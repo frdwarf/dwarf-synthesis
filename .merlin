@@ -1,0 +1,7 @@
+S .
+S DwarfSynth
+B _build
+B _build/DwarfSynth
+PKG bap
+PKG core_kernel
+PKG bap_primus

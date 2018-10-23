@@ -1,0 +1,8 @@
+true: bin_annot
+"DwarfSynth": include
+<DwarfSynth/Main.cmx>: for-pack(DwarfSynth)
+<DwarfSynth/Std.cmx>: for-pack(DwarfSynth)
+<DwarfSynth/PreDwarf.cmx>: for-pack(DwarfSynth)
+<DwarfSynth/Regs.cmx>: for-pack(DwarfSynth)
+<DwarfSynth/OnlyUnwind.cmx>: for-pack(DwarfSynth)
+<DwarfSynth/Simplest.cmx>: for-pack(DwarfSynth)
