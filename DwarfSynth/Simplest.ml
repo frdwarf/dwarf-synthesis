@@ -2,13 +2,17 @@ open Std
 module CFG = BStd.Graphs.Ir
 
 type memory_offset = int64
+type memory_address = int64
+
+module AddrMap = Map.Make(Int64)
+module AddrSet = Set.Make(Int64)
 
 type cfa_pos =
     RspOffset of memory_offset
   | RbpOffset of memory_offset
   | CfaLostTrack
 
-type cfa_change = CfaChange of BStd.word * cfa_pos
+type cfa_change = CfaChange of memory_address * cfa_pos
 
 type cfa_changes_fde = cfa_change list
 
@@ -24,8 +28,16 @@ let pp_cfa_pos ppx = function
   | RbpOffset off -> Format.fprintf ppx "RBP + (%s)@." (Int64.to_string off)
   | CfaLostTrack -> Format.fprintf ppx "??@."
 
+let pp_int64_hex ppx number =
+  let mask_short = Int64.(pred (shift_left one 16)) in
+  let pp_short number =
+    Format.fprintf ppx "%04x" Int64.(to_int (logand number mask_short))
+  in
+  List.iter pp_short @@ List.map (fun x ->
+      Int64.(shift_right number (16*x))) [3;2;1;0]
+
 let pp_cfa_change ppx = function CfaChange(addr, cfa_pos) ->
-  Format.fprintf ppx "%a: %a" BStd.Word.pp_hex addr pp_cfa_pos cfa_pos
+  Format.fprintf ppx "%a: %a" pp_int64_hex addr pp_cfa_pos cfa_pos
 
 let pp_cfa_changes_fde ppx = List.iter (pp_cfa_change ppx)
 
@@ -38,11 +50,115 @@ let pp_option_of sub_pp ppx = function
   | None -> Format.fprintf ppx "None"
   | Some x -> Format.fprintf ppx "Some %a" sub_pp x
 
+let opt_addr_of term =
+  (** Get the address of a term as an option, if it has one*)
+  BStd.Term.get_attr term BStd.address
+
 let addr_of term =
   (** Get the address of a term *)
-  match BStd.Term.get_attr term BStd.address with
+  match opt_addr_of term with
   | None -> assert false
   | Some addr -> addr
+
+let opt_addr_of_blk_elt = function
+  | `Def def -> opt_addr_of def
+  | `Jmp jmp -> opt_addr_of jmp
+  | `Phi phi -> opt_addr_of phi
+
+let entrypoint_address blk =
+  (** Find the first instruction address in the current block.
+      Return None if no instruction has address.  *)
+  let fold_one accu cur_elt = match accu, opt_addr_of_blk_elt cur_elt with
+    | None, None -> None
+    | None, Some x -> Some x
+    | _, _ -> accu
+  in
+
+  BStd.Seq.fold (BStd.Blk.elts blk)
+    ~init:None
+    ~f:fold_one
+
+let to_int64_addr addr =
+  BStd.Word.to_int64_exn addr
+
+let int64_addr_of x = to_int64_addr @@ addr_of x
+
+let map_option f = function
+  | None -> None
+  | Some x -> Some (f x)
+
+let build_next_instr graph =
+  (** Build a map of memory_address -> AddrSet.t holding, for each address, the
+      set of instructions coming right after the instruction at given address.
+      There might be multiple such addresses, if the current instruction is at
+      a point of branching.  *)
+
+  let addresses_in_block blk =
+    (** Set of addresses present in the block *)
+    BStd.Seq.fold (BStd.Blk.elts blk)
+      ~init:AddrSet.empty
+      ~f:(fun accu elt ->
+          let addr = opt_addr_of_blk_elt elt in
+          match addr with
+          | None -> accu
+          | Some x ->
+            (try
+               AddrSet.add (BStd.Word.to_int64_exn x) accu
+             with _ -> accu)
+        )
+  in
+
+  let node_successors_addr (nd: CFG.node) : AddrSet.t =
+    let rec do_find_succ accu nd =
+      let fold_one accu c_node =
+        match entrypoint_address (CFG.Node.label c_node) with
+        | Some addr ->
+          (try
+             AddrSet.add (BStd.Word.to_int64_exn addr) accu
+           with _ -> accu)
+        | None -> do_find_succ accu c_node
+      in
+
+      let succ = CFG.Node.succs nd graph in
+      BStd.Seq.fold succ
+        ~init:accu
+        ~f:fold_one
+    in
+    do_find_succ AddrSet.empty nd
+  in
+
+  let build_of_block accu_map node =
+    let blk = CFG.Node.label node in
+    let node_successors = node_successors_addr node in
+    let instr_addresses = AddrSet.elements @@ addresses_in_block blk in
+
+    let rec accumulate_mappings mappings addr_list = function
+      | None -> mappings
+      | Some (instr, instr_seq) as cur_instr ->
+        let instr_addr = opt_addr_of_blk_elt instr in
+        match (map_option to_int64_addr instr_addr), addr_list with
+        | None, _ ->
+          accumulate_mappings mappings addr_list @@ BStd.Seq.next instr_seq
+        | Some cur_addr, next_addr::t when cur_addr >= next_addr ->
+          accumulate_mappings mappings t cur_instr
+        | Some cur_addr, next_addr::_ ->
+          let n_mappings = AddrMap.add
+              cur_addr (AddrSet.singleton next_addr) mappings in
+          accumulate_mappings n_mappings addr_list @@ BStd.Seq.next instr_seq
+        | Some cur_addr, [] ->
+          let n_mappings = AddrMap.add
+              cur_addr node_successors mappings in
+          accumulate_mappings n_mappings addr_list @@ BStd.Seq.next instr_seq
+    in
+    accumulate_mappings
+      accu_map
+      instr_addresses
+      (BStd.Seq.next @@ BStd.Blk.elts blk)
+  in
+
+  BStd.Seq.fold (CFG.nodes graph)
+    ~init:AddrMap.empty
+    ~f:build_of_block
 
 let interpret_var_expr c_var offset expr = BStd.Bil.(
     let closed_form = BStd.Exp.substitute
@@ -58,10 +174,8 @@ let interpret_var_expr c_var offset expr = BStd.Bil.(
   )
 
 let process_def def (cur_offset: memory_offset)
-  : ((cfa_change * memory_offset) option) =
-  let lose_track addr =
-    Some (CfaChange(addr, CfaLostTrack), Int64.zero)
-  in
+  : ((cfa_pos * memory_offset) option) =
+  let lose_track = Some (CfaLostTrack, Int64.zero) in
   (match Regs.X86_64.of_var (BStd.Def.lhs def) with
    | Some reg when reg = Regs.X86_64.rsp ->
      let exp = BStd.Def.rhs def in
@@ -77,23 +191,23 @@ let process_def def (cur_offset: memory_offset)
                | Some x -> x) in
            let interpreted = interpret_var_expr bil_var cur_offset exp in
            (match interpreted with
-            | None -> lose_track (addr_of def)
+            | None -> lose_track
             | Some interp_val ->
               let gap = Int64.sub interp_val cur_offset in
               let new_offset = Int64.sub cur_offset gap in
-              Some (CfaChange(addr_of def, RspOffset(new_offset)), new_offset)
+              Some (RspOffset(new_offset), new_offset)
            )
-         | _ -> lose_track (addr_of def)
+         | _ -> lose_track
         )
-      | _ -> lose_track @@ addr_of def
+      | _ -> lose_track
      )
    | _ -> None)
 
 let process_jmp jmp (cur_offset: memory_offset)
-  : ((cfa_change * memory_offset) option) =
+  : ((cfa_pos * memory_offset) option) =
   let gen_change off =
     let new_offset = Int64.add cur_offset (Int64.of_int off) in
-    Some (CfaChange(addr_of jmp, RspOffset(new_offset)), new_offset)
+    Some (RspOffset(new_offset), new_offset)
   in
 
   match (BStd.Jmp.kind jmp) with
@@ -101,21 +215,32 @@ let process_jmp jmp (cur_offset: memory_offset)
   | BStd.Ret ret -> gen_change (8)
   | _ -> None
 
-let sym_of_blk blk : cfa_changes_fde =
+let sym_of_blk next_instr_graph blk : cfa_changes_fde =
   (** Extracts the symbolic CFA changes of a block. These changes assume that
       at the beginning of the block, CFA = RspOffset(0) and will be offset
       after *)
 
-  let apply_offset (accu, cur_offset) = function
+  let apply_offset cur_addr_opt ((accu:cfa_change list), cur_offset) = function
     | None -> (accu, cur_offset)
-    | Some (change, n_offset) -> (change :: accu, n_offset)
+    | Some (pos, n_offset) ->
+      let cur_addr = (match cur_addr_opt with
+          | None -> assert false
+          | Some x -> to_int64_addr x) in
+      (AddrSet.fold (fun n_addr cur_accu ->
+        let change = CfaChange(n_addr, pos) in
+        (change :: cur_accu))
+        (AddrMap.find cur_addr next_instr_graph)
+        accu),
+      n_offset
   in
 
   let fold_elt (accu, cur_offset) elt = match elt with
     | `Def(def) ->
-      apply_offset (accu, cur_offset) @@ process_def def cur_offset
+      apply_offset
+        (opt_addr_of def) (accu, cur_offset) @@ process_def def cur_offset
     | `Jmp(jmp) ->
-      apply_offset (accu, cur_offset) @@ process_jmp jmp cur_offset
+      apply_offset
+        (opt_addr_of jmp) (accu, cur_offset) @@ process_jmp jmp cur_offset
     | _ -> (accu, cur_offset)
   in
 
@@ -163,9 +288,6 @@ let get_entry_blk graph =
   | None -> assert false
   | Some x -> x
 
-let term_addr term =
-  BStd.Term.get_attr term BStd.address
-
 let same_keys map1 map2 =
   let exists_in_other other key _ =
     TIdMap.mem key other in
@@ -178,14 +300,17 @@ let of_sub sub : cfa_changes_fde =
 
   Format.eprintf "Sub %s...@." @@ BStd.Sub.name sub ;
 
+  let cfg = BStd.Sub.to_cfg sub in
+  let next_instr_graph = build_next_instr cfg in
+
   let initial_cfa_rsp_offset = Int64.of_int 8 in
   let store_sym accu blk =
     let blk = CFG.Node.label blk in
-    let res = sym_of_blk blk in
+    let res = sym_of_blk next_instr_graph blk in
     TIdMap.add (BStd.Term.tid blk) res accu
   in
 
-  let node_addr nd = term_addr @@ CFG.Node.label nd in
+  let node_addr nd = opt_addr_of @@ CFG.Node.label nd in
 
   let merge_corrected blk_tid changes offset = match (changes, offset) with
     | Some changes, Some offset ->
@@ -200,8 +325,6 @@ let of_sub sub : cfa_changes_fde =
       )
     | _ -> None
   in
-
-  let cfg = BStd.Sub.to_cfg sub in
 
   let tid_match = BStd.Seq.fold (CFG.nodes cfg)
       ~init:TIdMap.empty
@@ -248,11 +371,8 @@ let of_sub sub : cfa_changes_fde =
       []
       (List.map (fun (x, y) -> x) sorted_blk) in
 
-  let sub_addr = (match term_addr sub with
-      | Some x -> x
-      | None -> assert false) in
   let init = [
-    CfaChange(sub_addr, RspOffset(initial_cfa_rsp_offset))
+    CfaChange(int64_addr_of sub, RspOffset(initial_cfa_rsp_offset))
   ] in
   init @ out
 
@@ -305,7 +425,7 @@ let of_prog prog : cfa_changes =
   (** Extracts the `cfa_changes` of a program *)
   let fold_step accu sub =
     (try
-       let res = (*cleanup_fde @@ *)of_sub sub in
+       let res = cleanup_fde @@ of_sub sub in
        StrMap.add (BStd.Sub.name sub) res accu
      with InvalidSub -> accu)
   in
