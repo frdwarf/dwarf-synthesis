@@ -163,13 +163,13 @@ let build_next_instr graph =
 let interpret_var_expr c_var offset expr = BStd.Bil.(
     let closed_form = BStd.Exp.substitute
       (var c_var)
-      (int (BStd.Word.of_int64 offset))
+      (int (BStd.Word.of_int64 (Int64.neg offset)))
       expr
     in
     let res = BStd.Exp.eval closed_form in
     match res with
     | Imm value ->
-      Some (BStd.Word.to_int64_exn @@ BStd.Word.signed value)
+      Some (Int64.neg @@ BStd.Word.to_int64_exn @@ BStd.Word.signed value)
     | _ -> None
   )
 
@@ -192,9 +192,7 @@ let process_def def (cur_offset: memory_offset)
            let interpreted = interpret_var_expr bil_var cur_offset exp in
            (match interpreted with
             | None -> lose_track
-            | Some interp_val ->
-              let gap = Int64.sub interp_val cur_offset in
-              let new_offset = Int64.sub cur_offset gap in
+            | Some new_offset ->
               Some (RspOffset(new_offset), new_offset)
            )
          | _ -> lose_track
