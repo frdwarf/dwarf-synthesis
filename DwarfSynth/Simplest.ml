@@ -407,7 +407,13 @@ let of_prog prog : cfa_changes =
     (try
        let res = cleanup_fde @@ process_sub sub in
        StrMap.add (BStd.Sub.name sub) res accu
-     with InvalidSub -> accu)
+     with
+     | InvalidSub -> accu
+     | Inconsistent tid ->
+       Format.eprintf "Inconsistent TId %a in subroutine %s, skipping.@."
+         BStd.Tid.pp tid (BStd.Sub.name sub);
+       accu
+    )
   in
   let subroutines = BStd.Term.enum BStd.sub_t prog in
   BStd.Seq.fold subroutines
