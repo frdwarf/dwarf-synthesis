@@ -173,11 +173,12 @@ let interpret_var_expr c_var offset expr = BStd.Bil.(
     | _ -> None
   )
 
-let process_def def (cur_offset: memory_offset)
-  : ((cfa_pos * memory_offset) option) =
-  let lose_track = Some (CfaLostTrack, Int64.zero) in
-  (match Regs.X86_64.of_var (BStd.Def.lhs def) with
-   | Some reg when reg = Regs.X86_64.rsp ->
+let process_def def (cur_cfa: cfa_pos)
+  : (cfa_pos option) =
+  let lose_track = Some (CfaLostTrack) in
+
+  (match cur_cfa, Regs.X86_64.of_var (BStd.Def.lhs def) with
+   | RspOffset(cur_offset), Some reg when reg = Regs.X86_64.rsp ->
      let exp = BStd.Def.rhs def in
      let free_vars = BStd.Exp.free_vars exp in
      let free_x86_regs = Regs.X86_64.map_varset free_vars in
@@ -193,7 +194,7 @@ let process_def def (cur_offset: memory_offset)
            (match interpreted with
             | None -> lose_track
             | Some new_offset ->
-              Some (RspOffset(new_offset), new_offset)
+              Some (RspOffset(new_offset))
            )
          | _ -> lose_track
         )
@@ -201,11 +202,14 @@ let process_def def (cur_offset: memory_offset)
      )
    | _ -> None)
 
-let process_jmp jmp (cur_offset: memory_offset)
-  : ((cfa_pos * memory_offset) option) =
-  let gen_change off =
-    let new_offset = Int64.add cur_offset (Int64.of_int off) in
-    Some (RspOffset(new_offset), new_offset)
+let process_jmp jmp (cur_cfa: cfa_pos)
+  : (cfa_pos option) =
+  let gen_change = match cur_cfa with
+    | RspOffset cur_offset -> (fun off ->
+        let new_offset = Int64.add cur_offset (Int64.of_int off) in
+        Some (RspOffset(new_offset))
+      )
+    | _ -> (fun _ -> None)
   in
 
   match (BStd.Jmp.kind jmp) with
@@ -213,14 +217,13 @@ let process_jmp jmp (cur_offset: memory_offset)
   | BStd.Ret ret -> gen_change (8)
   | _ -> None
 
-let sym_of_blk next_instr_graph blk : cfa_changes_fde =
-  (** Extracts the symbolic CFA changes of a block. These changes assume that
-      at the beginning of the block, CFA = RspOffset(0) and will be offset
-      after *)
+let process_blk
+    next_instr_graph (block_init: cfa_pos) blk : (cfa_changes_fde * cfa_pos) =
+  (** Extracts the CFA changes of a block. *)
 
-  let apply_offset cur_addr_opt ((accu:cfa_change list), cur_offset) = function
-    | None -> (accu, cur_offset)
-    | Some (pos, n_offset) ->
+  let apply_offset cur_addr_opt ((accu:cfa_change list), cur_cfa) = function
+    | None -> (accu, cur_cfa)
+    | Some pos ->
       let cur_addr = (match cur_addr_opt with
           | None -> assert false
           | Some x -> to_int64_addr x) in
@@ -229,54 +232,26 @@ let sym_of_blk next_instr_graph blk : cfa_changes_fde =
         (change :: cur_accu))
         (AddrMap.find cur_addr next_instr_graph)
         accu),
-      n_offset
+      pos
   in
 
-  let fold_elt (accu, cur_offset) elt = match elt with
+  let fold_elt (accu, cur_cfa) elt = match elt with
     | `Def(def) ->
       apply_offset
-        (opt_addr_of def) (accu, cur_offset) @@ process_def def cur_offset
+        (opt_addr_of def) (accu, cur_cfa) @@ process_def def cur_cfa
     | `Jmp(jmp) ->
       apply_offset
-        (opt_addr_of jmp) (accu, cur_offset) @@ process_jmp jmp cur_offset
-    | _ -> (accu, cur_offset)
+        (opt_addr_of jmp) (accu, cur_cfa) @@ process_jmp jmp cur_cfa
+    | _ -> (accu, cur_cfa)
   in
 
   let elts_seq = BStd.Blk.elts blk in
-  let out, end_offset = BStd.Seq.fold elts_seq
-    ~init:([], Int64.zero)
+  let out, end_cfa = BStd.Seq.fold elts_seq
+    ~init:([], block_init)
     ~f:fold_elt in
-  out
-
-let end_offset (changelist: cfa_changes_fde): memory_offset option =
-  match changelist with
-  | CfaChange(_, RspOffset(x)) :: _ -> Some x
-  | _ -> None
+  out, end_cfa
 
 exception Inconsistent of BStd.tid
-
-let rec dfs_propagate changemap propagated parent_val node graph =
-  let c_tid = BStd.Term.tid @@ CFG.Node.label node in
-  match TIdMap.find_opt c_tid propagated with
-  | Some x ->
-    if x = parent_val then
-      (* Already propagated and consistent, all fine *)
-      propagated
-    else
-      (* Already propagated with a different value: inconsistency *)
-      raise (Inconsistent c_tid)
-  | None ->
-    let n_propagated = TIdMap.add c_tid parent_val propagated in
-    let outwards = CFG.Node.outputs node graph in
-    let self_entry = TIdMap.find c_tid changemap in
-    let offset = (match end_offset self_entry with
-          Some x -> x
-        | None -> Int64.zero) in
-    let cur_val = Int64.add parent_val offset in
-    BStd.Seq.fold outwards
-      ~init:n_propagated
-      ~f:(fun accu edge ->
-          dfs_propagate changemap accu cur_val (CFG.Edge.dst edge) graph)
 
 let get_entry_blk graph =
   let entry = BStd.Seq.min_elt (CFG.nodes graph) ~cmp:(fun x y ->
@@ -292,14 +267,7 @@ let get_entry_blk graph =
   | None -> assert false
   | Some x -> x
 
-let same_keys map1 map2 =
-  let exists_in_other other key _ =
-    TIdMap.mem key other in
-
-  TIdMap.for_all (exists_in_other map2) map1
-  && TIdMap.for_all (exists_in_other map1) map2
-
-let of_sub sub : cfa_changes_fde =
+let process_sub sub : cfa_changes_fde =
   (** Extracts the `cfa_changes_fde` of a subroutine *)
 
   Format.eprintf "Sub %s...@." @@ BStd.Sub.name sub ;
@@ -308,77 +276,48 @@ let of_sub sub : cfa_changes_fde =
   let next_instr_graph = build_next_instr cfg in
 
   let initial_cfa_rsp_offset = Int64.of_int 8 in
-  let store_sym accu blk =
-    let blk = CFG.Node.label blk in
-    let res = sym_of_blk next_instr_graph blk in
-    TIdMap.add (BStd.Term.tid blk) res accu
-  in
 
-  let node_addr nd = opt_addr_of @@ CFG.Node.label nd in
+  let rec dfs_process
+      (sub_changes: (cfa_changes_fde * cfa_pos) TIdMap.t) node entry_offset =
+    (** Processes one block *)
 
-  let merge_corrected blk_tid changes offset = match (changes, offset) with
-    | Some changes, Some offset ->
-      Some (
-        List.map (fun (CfaChange(addr, pos)) -> match pos with
-              RspOffset(off) -> CfaChange(addr,
-                                          RspOffset(Int64.add off offset))
-            | RbpOffset(off) -> CfaChange(addr, RbpOffset(off))
-            | CfaLostTrack -> CfaChange(addr, CfaLostTrack)
-          )
-          changes
-      )
-    | _ -> None
-  in
+    let cur_blk = CFG.Node.label node in
+    let tid = BStd.Term.tid @@ cur_blk in
 
-  let tid_match = BStd.Seq.fold (CFG.nodes cfg)
-      ~init:TIdMap.empty
-      ~f:(fun accu node ->
-          let tid = BStd.Term.tid @@ CFG.Node.label node in
-          TIdMap.add tid node accu)
-  in
-
-  let blk_sym = BStd.Seq.fold
-      ~init:TIdMap.empty
-      ~f:store_sym
-      @@ CFG.nodes cfg
+    match (TIdMap.find_opt tid sub_changes) with
+    | None ->
+      (* Not yet visited: compute the changes *)
+      let cur_blk_changes, end_cfa =
+        process_blk next_instr_graph entry_offset cur_blk in
+      let n_sub_changes =
+        TIdMap.add tid (cur_blk_changes, entry_offset) sub_changes in
+      BStd.Seq.fold (CFG.Node.succs node cfg)
+        ~f:(fun accu child -> dfs_process accu child end_cfa)
+        ~init:n_sub_changes
+    | Some (_, former_entry_offset) ->
+      (* Already visited: check that entry values are matching *)
+      if entry_offset <> former_entry_offset then
+        raise (Inconsistent tid)
+      else
+        sub_changes
   in
 
   let entry_blk = get_entry_blk cfg in
-  let offset_map = dfs_propagate
-      blk_sym (TIdMap.empty) initial_cfa_rsp_offset entry_blk cfg in
+  let initial_offset = (RspOffset initial_cfa_rsp_offset) in
+  let changes_map = dfs_process TIdMap.empty entry_blk initial_offset in
 
-  let corrected = TIdMap.merge merge_corrected blk_sym offset_map in
+  let merged_changes = TIdMap.fold
+    (fun _ (cfa_changes, _) accu -> cfa_changes @ accu)
+    changes_map
+    [CfaChange(int64_addr_of sub, initial_offset)] in
 
-  let is_connex = same_keys tid_match corrected in
-  if not is_connex then
-    raise InvalidSub ;
-
-  let tid_list = TIdMap.bindings tid_match in
-  let sorted_blk = List.sort (fun (tid1, bl1) (tid2, bl2) ->
-      let res = match (node_addr bl1, node_addr bl2) with
-        | Some addr1, Some addr2 -> compare addr1 addr2
-        | Some _, None -> 1
-        | None, Some _ -> -1
-        | None, None -> compare tid1 tid2
+  let sorted_changes = List.sort
+      (fun (CfaChange (addr1, _)) (CfaChange (addr2, _)) ->
+         compare addr1 addr2)
+      merged_changes
       in
-      -res)
-      tid_list
-  in
 
-  let out = List.fold_left
-      (fun accu blk ->
-         let changes = TIdMap.find blk corrected in
-         List.fold_left (fun accu chg -> chg::accu)
-           accu
-           changes
-      )
-      []
-      (List.map (fun (x, y) -> x) sorted_blk) in
-
-  let init = [
-    CfaChange(int64_addr_of sub, RspOffset(initial_cfa_rsp_offset))
-  ] in
-  init @ out
+  sorted_changes
 
 let cleanup_fde (fde_changes: cfa_changes_fde) : cfa_changes_fde =
   (** Cleanup the result of `of_sub`.
@@ -429,7 +368,7 @@ let of_prog prog : cfa_changes =
   (** Extracts the `cfa_changes` of a program *)
   let fold_step accu sub =
     (try
-       let res = cleanup_fde @@ of_sub sub in
+       let res = cleanup_fde @@ process_sub sub in
        StrMap.add (BStd.Sub.name sub) res accu
      with InvalidSub -> accu)
   in
