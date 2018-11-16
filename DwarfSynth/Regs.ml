@@ -54,7 +54,15 @@ module X86_64 = struct
   let r15 = DwReg(15)
   let rip = DwReg(16)
 
-  let name_map = StrMap.add "RSP" rsp StrMap.empty (* TODO *)
+  let name_map_data = [
+    ("RSP", rsp);
+    ("RBP", rbp);
+  ] (* TODO *)
+
+  let name_map = List.fold_left
+      (fun accu (name, reg) -> StrMap.add name reg accu)
+      StrMap.empty
+      name_map_data
 
   let get_register reg = match is_register reg with
     | false -> None

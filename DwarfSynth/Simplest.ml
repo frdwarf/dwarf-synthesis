@@ -173,6 +173,27 @@ let interpret_var_expr c_var offset expr = BStd.Bil.(
     | _ -> None
   )
 
+let is_single_free_reg expr =
+  (** Detects whether `expr` contains a single free variable which is a machine
+      register, and if so, extracts this register and returns a pair `(formal,
+      reg`) of its formal variable in the expression and the register.
+      Otherwise return None. *)
+  let free_vars = BStd.Exp.free_vars expr in
+  let free_x86_regs = Regs.X86_64.map_varset free_vars in
+  (match Regs.DwRegOptSet.cardinal free_x86_regs with
+   | 1 ->
+        let free_var = Regs.DwRegOptSet.choose free_x86_regs in
+        (match free_var with
+         | Some dw_var ->
+           let bil_var = (match BStd.Var.Set.choose free_vars with
+               | None -> assert false
+               | Some x -> x) in
+           Some (bil_var, dw_var)
+         | _ -> None
+        )
+   | _ -> None
+  )
+
 let process_def def (cur_cfa: cfa_pos)
   : (cfa_pos option) =
   let lose_track = Some (CfaLostTrack) in
@@ -180,25 +201,40 @@ let process_def def (cur_cfa: cfa_pos)
   (match cur_cfa, Regs.X86_64.of_var (BStd.Def.lhs def) with
    | RspOffset(cur_offset), Some reg when reg = Regs.X86_64.rsp ->
      let exp = BStd.Def.rhs def in
-     let free_vars = BStd.Exp.free_vars exp in
-     let free_x86_regs = Regs.X86_64.map_varset free_vars in
-     (match Regs.DwRegOptSet.cardinal free_x86_regs with
-      | 1 ->
-        let free_var = Regs.DwRegOptSet.choose free_x86_regs in
-        (match free_var with
-         | Some dw_var when dw_var = Regs.X86_64.rsp ->
-           let bil_var = (match BStd.Var.Set.choose free_vars with
-               | None -> assert false
-               | Some x -> x) in
+     (match is_single_free_reg exp with
+      | Some (bil_var, dw_var) when dw_var = Regs.X86_64.rsp ->
            let interpreted = interpret_var_expr bil_var cur_offset exp in
            (match interpreted with
             | None -> lose_track
             | Some new_offset ->
               Some (RspOffset(new_offset))
            )
-         | _ -> lose_track
-        )
       | _ -> lose_track
+     )
+   | RspOffset(cur_offset), Some reg when reg = Regs.X86_64.rbp ->
+     (* We have CFA=rsp+k and a line %rbp <- [expr]. Might be a %rbp <- %rsp *)
+     let exp = BStd.Def.rhs def in
+     (match is_single_free_reg exp with
+      | Some (bil_var, dw_var) when dw_var = Regs.X86_64.rsp ->
+        (* We have %rbp := F(%rsp) *)
+        (* FIXME we wish to have %rbp := %rsp. An ugly and non-robust test to
+           check that would be interpret F(0), expecting that F is at worst
+           affine - then a restult of 0 means that %rbp := %rsp + 0 *)
+        let interpreted = interpret_var_expr bil_var (Int64.zero) exp in
+        (match interpreted with
+         | Some offset when offset = Int64.zero ->
+           Some (RbpOffset(cur_offset))
+         | _ ->
+           (* Previous instruction was rsp-indexed, here we put something weird
+              in %rbp, let's keep indexing with rsp and do nothing *)
+           None
+        )
+     | _ ->
+       (* Assume we are overwriting %rbp with something — we must revert to
+          some rsp-based indexing *)
+       (* FIXME don't assume the rsp offset will always be 8, find a smart way
+          to figure this out *)
+       Some (RspOffset(Int64.of_int 8))
      )
    | _ -> None)
 
