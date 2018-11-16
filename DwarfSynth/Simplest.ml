@@ -279,10 +279,16 @@ let rec dfs_propagate changemap propagated parent_val node graph =
           dfs_propagate changemap accu cur_val (CFG.Edge.dst edge) graph)
 
 let get_entry_blk graph =
-  let entry =
-    BStd.Seq.find (CFG.nodes graph)
-      (fun node -> BStd.Seq.is_empty @@ CFG.Node.inputs node graph)
-  in match entry with
+  let entry = BStd.Seq.min_elt (CFG.nodes graph) ~cmp:(fun x y ->
+      let ax = opt_addr_of @@ CFG.Node.label x
+      and ay = opt_addr_of @@ CFG.Node.label y in
+      match ax, ay with
+      | None, None -> compare x y
+      | Some _, None -> -1
+      | None, Some _ -> 1
+      | Some ax, Some ay -> compare (to_int64_addr ax) (to_int64_addr ay))
+  in
+  match entry with
   | None -> assert false
   | Some x -> x
 
