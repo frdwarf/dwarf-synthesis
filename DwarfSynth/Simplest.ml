@@ -229,13 +229,14 @@ let process_def def (cur_cfa: cfa_pos)
               in %rbp, let's keep indexing with rsp and do nothing *)
            None
         )
-     | _ ->
+     | _ -> None
+     )
+   | RbpOffset(cur_offset), Some reg when reg = Regs.X86_64.rbp ->
        (* Assume we are overwriting %rbp with something — we must revert to
           some rsp-based indexing *)
        (* FIXME don't assume the rsp offset will always be 8, find a smart way
           to figure this out *)
        Some (RspOffset(Int64.of_int 8))
-     )
    | _ -> None)
 
 let process_jmp jmp (cur_cfa: cfa_pos)
