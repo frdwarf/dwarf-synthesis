@@ -6,3 +6,4 @@ true: bin_annot
 <DwarfSynth/Regs.cmx>: for-pack(DwarfSynth)
 <DwarfSynth/OnlyUnwind.cmx>: for-pack(DwarfSynth)
 <DwarfSynth/Simplest.cmx>: for-pack(DwarfSynth)
+<DwarfSynth/Frontend.cmx>: for-pack(DwarfSynth)
