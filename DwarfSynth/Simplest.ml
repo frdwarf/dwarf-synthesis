@@ -12,9 +12,7 @@ type cfa_pos =
   | RbpOffset of memory_offset
   | CfaLostTrack
 
-type cfa_change = CfaChange of memory_address * cfa_pos
-
-type cfa_changes_fde = cfa_change list
+type cfa_changes_fde = cfa_pos AddrMap.t
 
 module StrMap = Map.Make(String)
 type cfa_changes = cfa_changes_fde StrMap.t
@@ -36,11 +34,12 @@ let pp_int64_hex ppx number =
   List.iter pp_short @@ List.map (fun x ->
       Int64.(shift_right number (16*x))) [3;2;1;0]
 
-let pp_cfa_change ppx = function CfaChange(addr, cfa_pos) ->
-  Format.fprintf ppx "%a: %a" pp_int64_hex addr pp_cfa_pos cfa_pos
-
-let pp_cfa_changes_fde ppx = List.iter
-    (Format.fprintf ppx "%a@." pp_cfa_change)
+let pp_cfa_changes_fde ppx cfa_changes = AddrMap.iter
+    (fun addr change ->
+       Format.fprintf ppx "%a: %a@."
+         pp_int64_hex addr
+         pp_cfa_pos change)
+    cfa_changes
 
 let pp_cfa_changes ppx =
   StrMap.iter (fun fde_name entry ->
@@ -259,15 +258,14 @@ let process_blk
     next_instr_graph (block_init: cfa_pos) blk : (cfa_changes_fde * cfa_pos) =
   (** Extracts the CFA changes of a block. *)
 
-  let apply_offset cur_addr_opt ((accu:cfa_change list), cur_cfa) = function
+  let apply_offset cur_addr_opt ((accu:cfa_changes_fde), cur_cfa) = function
     | None -> (accu, cur_cfa)
     | Some pos ->
       let cur_addr = (match cur_addr_opt with
           | None -> assert false
           | Some x -> to_int64_addr x) in
       (AddrSet.fold (fun n_addr cur_accu ->
-           let change = CfaChange(n_addr, pos) in
-           (change :: cur_accu))
+           AddrMap.add n_addr pos cur_accu)
           (AddrMap.find cur_addr next_instr_graph)
           accu),
       pos
@@ -284,10 +282,10 @@ let process_blk
   in
 
   let init_changes = (match opt_addr_of blk with
-      | None -> []
+      | None -> AddrMap.empty
       | Some x ->
         let blk_address = to_int64_addr x in
-        [CfaChange (blk_address, block_init)]
+        AddrMap.singleton blk_address block_init
     ) in
 
   let elts_seq = BStd.Blk.elts blk in
@@ -352,61 +350,35 @@ let process_sub sub : cfa_changes_fde =
   let changes_map = dfs_process TIdMap.empty entry_blk initial_offset in
 
   let merged_changes = TIdMap.fold
-    (fun _ (cfa_changes, _) accu -> cfa_changes @ accu)
+      (fun _ (cfa_changes, _) accu -> AddrMap.union (fun _ v1 v2 ->
+           if v1 = v2 then
+             Some v1
+           else
+             assert false)
+           cfa_changes accu)
     changes_map
-    [] in
+    AddrMap.empty in
 
-  let sorted_changes = List.sort
-      (fun (CfaChange (addr1, _)) (CfaChange (addr2, _)) ->
-         compare addr1 addr2)
-      merged_changes
-      in
-
-  sorted_changes
+  merged_changes
 
 let cleanup_fde (fde_changes: cfa_changes_fde) : cfa_changes_fde =
   (** Cleanup the result of `of_sub`.
 
       Merges entries at the same address, propagates track lost *)
 
-  let fold_one (accu, (last_commit:cfa_pos option), in_flight, lost_track) = function
-    | CfaChange(addr, cfa_change) as cur_change -> (
-        match lost_track, in_flight, cfa_change with
-        | true, _, _ ->
-          (* Already lost track: give up *)
-          (accu, last_commit, None, lost_track)
-        | false, _, CfaLostTrack ->
-          (* Just lost track: give up the operation on flight as well *)
-          (cur_change :: accu, None, None, true)
-        | _, Some CfaChange(flight_addr, flight_chg), _
-          when flight_addr = addr ->
-          (* On flight address matches current address: continue flying *)
-            accu, last_commit, Some cur_change, false
-        | _, Some CfaChange(_, in_flight_inner_pos), _
-          when last_commit = Some in_flight_inner_pos ->
-          (* Doesn't match anymore, but there was some operation in flight,
-             which has the same result as what was last committed. Discard. *)
-          (accu, last_commit, Some cur_change, false)
-        | _, Some (CfaChange(_, in_flight_inner_pos) as in_flight_inner), _ ->
-          (* Doesn't match anymore, but there was some operation in flight:
-             commit it, put the new one in flight *)
-          (in_flight_inner :: accu, Some in_flight_inner_pos,
-           Some cur_change, false)
-        | _, None, _ ->
-          (* No operation in flight: put the new one in flight *)
-          (accu, last_commit, Some cur_change, false)
-    )
+  let fold_one addr cfa_change (accu, last_change, lost_track) =
+    match cfa_change, last_change, lost_track with
+    | _, _, true -> (accu, None, lost_track)
+    | CfaLostTrack, _, false ->
+      (AddrMap.add addr cfa_change accu, None, true)
+    | cfa_change, Some prev_change, false when cfa_change = prev_change ->
+      (accu, last_change, false)
+    | cfa_change, _, false ->
+      (AddrMap.add addr cfa_change accu, Some cfa_change, false)
   in
 
-  let extract_end_value (accu, _, in_flight, lost_track) =
-    List.rev @@ match lost_track, in_flight with
-    | true, _ -> accu
-    | false, None -> accu
-    | false, Some x -> x :: accu
-  in
-
-  extract_end_value
-    @@ List.fold_left fold_one ([], None, None, false) fde_changes
+  match AddrMap.fold fold_one fde_changes (AddrMap.empty, None, false) with
+  | out, _, _ -> out
 
 
 let of_prog prog : cfa_changes =

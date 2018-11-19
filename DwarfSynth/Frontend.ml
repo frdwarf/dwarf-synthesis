@@ -10,7 +10,7 @@ let pp_int64_hex ppx number =
   List.iter pp_short @@ List.map (fun x ->
       Int64.(shift_right number (16*x))) [3;2;1;0]
 
-let pp_cfa_change ppx (Simplest.CfaChange (addr, pos)) = Simplest.(
+let pp_cfa_change ppx addr pos = Simplest.(
     let num_len num =
       let str_rep = Format.sprintf "%+d" num in
       String.length str_rep
@@ -34,11 +34,9 @@ let pp_cfa_change ppx (Simplest.CfaChange (addr, pos)) = Simplest.(
 let pp_pre_dwarf_readelf ppx pre_dwarf =
   Simplest.StrMap.iter (fun fde_name entry ->
       Format.fprintf ppx "FDE %s@." fde_name ;
-      (match entry with
-       | [] -> ()
-       | _ ->
+      if not (Simplest.AddrMap.is_empty entry) then (
          Format.fprintf ppx "   LOC           CFA      ra@." ;
-         List.iter (pp_cfa_change ppx) entry ;
+         Simplest.AddrMap.iter (pp_cfa_change ppx) entry ;
          Format.fprintf ppx "@.")
     )
     pre_dwarf
