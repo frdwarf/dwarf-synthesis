@@ -24,8 +24,8 @@ module TIdMap = Map.Make(BStd.Tid)
 exception InvalidSub
 
 let pp_cfa_pos ppx = function
-  | RspOffset off -> Format.fprintf ppx "RSP + (%s)@." (Int64.to_string off)
-  | RbpOffset off -> Format.fprintf ppx "RBP + (%s)@." (Int64.to_string off)
+  | RspOffset off -> Format.fprintf ppx "RSP + (%s)" (Int64.to_string off)
+  | RbpOffset off -> Format.fprintf ppx "RBP + (%s)" (Int64.to_string off)
   | CfaLostTrack -> Format.fprintf ppx "??@."
 
 let pp_int64_hex ppx number =
@@ -39,7 +39,8 @@ let pp_int64_hex ppx number =
 let pp_cfa_change ppx = function CfaChange(addr, cfa_pos) ->
   Format.fprintf ppx "%a: %a" pp_int64_hex addr pp_cfa_pos cfa_pos
 
-let pp_cfa_changes_fde ppx = List.iter (pp_cfa_change ppx)
+let pp_cfa_changes_fde ppx = List.iter
+    (Format.fprintf ppx "%a@." pp_cfa_change)
 
 let pp_cfa_changes ppx =
   StrMap.iter (fun fde_name entry ->
@@ -265,10 +266,10 @@ let process_blk
           | None -> assert false
           | Some x -> to_int64_addr x) in
       (AddrSet.fold (fun n_addr cur_accu ->
-        let change = CfaChange(n_addr, pos) in
-        (change :: cur_accu))
-        (AddrMap.find cur_addr next_instr_graph)
-        accu),
+           let change = CfaChange(n_addr, pos) in
+           (change :: cur_accu))
+          (AddrMap.find cur_addr next_instr_graph)
+          accu),
       pos
   in
 
@@ -282,9 +283,16 @@ let process_blk
     | _ -> (accu, cur_cfa)
   in
 
+  let init_changes = (match opt_addr_of blk with
+      | None -> []
+      | Some x ->
+        let blk_address = to_int64_addr x in
+        [CfaChange (blk_address, block_init)]
+    ) in
+
   let elts_seq = BStd.Blk.elts blk in
   let out, end_cfa = BStd.Seq.fold elts_seq
-    ~init:([], block_init)
+    ~init:(init_changes, block_init)
     ~f:fold_elt in
   out, end_cfa
 
@@ -346,7 +354,7 @@ let process_sub sub : cfa_changes_fde =
   let merged_changes = TIdMap.fold
     (fun _ (cfa_changes, _) accu -> cfa_changes @ accu)
     changes_map
-    [CfaChange(int64_addr_of sub, initial_offset)] in
+    [] in
 
   let sorted_changes = List.sort
       (fun (CfaChange (addr1, _)) (CfaChange (addr2, _)) ->
