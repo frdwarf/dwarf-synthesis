@@ -14,8 +14,14 @@ type cfa_pos =
 
 type cfa_changes_fde = cfa_pos AddrMap.t
 
+type subroutine_cfa_data = {
+  cfa_changes_fde: cfa_changes_fde;
+  beg_pos: memory_address;
+  end_pos: memory_address;
+}
+
 module StrMap = Map.Make(String)
-type cfa_changes = cfa_changes_fde StrMap.t
+type subroutine_cfa_map = subroutine_cfa_data StrMap.t
 
 module TIdMap = Map.Make(BStd.Tid)
 
@@ -310,13 +316,75 @@ let get_entry_blk graph =
   | None -> assert false
   | Some x -> x
 
-let process_sub sub : cfa_changes_fde =
+let find_last_addr sub =
+  (** Finds the maximal instruction address in a subroutine *)
+
+  let map_opt fl fr merge l r = match l, r with
+    | None, None -> None
+    | Some x, None -> Some (fl x)
+    | None, Some y -> Some (fr y)
+    | Some x, Some y -> Some (merge (fl x) (fr y))
+  in
+  let max_opt_addr_word = map_opt
+      (fun x -> x)
+      (fun y -> to_int64_addr y)
+      max
+  in
+  let max_opt_addr = map_opt
+      (fun x -> x)
+      (fun y -> y)
+      max
+  in
+  let max_def cur_max def =
+    max_opt_addr_word cur_max (opt_addr_of def)
+  in
+
+  let fold_res =
+    BStd.Seq.fold (BStd.Term.enum BStd.blk_t sub)
+      ~init:None
+      ~f:(fun cur_max blk ->
+          max_opt_addr
+            (BStd.Seq.fold (BStd.Term.enum BStd.def_t blk)
+               ~init:cur_max
+               ~f:max_def)
+            (BStd.Seq.fold (BStd.Term.enum BStd.jmp_t blk)
+               ~init:cur_max
+               ~f:max_def)
+        )
+  in
+  match fold_res with
+  | None -> Int64.zero
+  | Some x -> x
+
+let cleanup_fde (fde_changes: cfa_changes_fde) : cfa_changes_fde =
+  (** Cleanup the result of `of_sub`.
+
+      Merges entries at the same address, propagates track lost *)
+
+  let fold_one addr cfa_change (accu, last_change, lost_track) =
+    match cfa_change, last_change, lost_track with
+    | _, _, true -> (accu, None, lost_track)
+    | CfaLostTrack, _, false ->
+      (AddrMap.add addr cfa_change accu, None, true)
+    | cfa_change, Some prev_change, false when cfa_change = prev_change ->
+      (accu, last_change, false)
+    | cfa_change, _, false ->
+      (AddrMap.add addr cfa_change accu, Some cfa_change, false)
+  in
+
+  match AddrMap.fold fold_one fde_changes (AddrMap.empty, None, false) with
+  | out, _, _ -> out
+
+let process_sub sub : subroutine_cfa_data =
   (** Extracts the `cfa_changes_fde` of a subroutine *)
 
   Format.eprintf "Sub %s...@." @@ BStd.Sub.name sub ;
 
   let cfg = BStd.Sub.to_cfg sub in
   let next_instr_graph = build_next_instr cfg in
+
+  let first_addr = int64_addr_of sub in
+  let last_addr = find_last_addr sub in
 
   let initial_cfa_rsp_offset = Int64.of_int 8 in
 
@@ -359,34 +427,22 @@ let process_sub sub : cfa_changes_fde =
     changes_map
     AddrMap.empty in
 
-  merged_changes
+  let cfa_changes = cleanup_fde merged_changes in
 
-let cleanup_fde (fde_changes: cfa_changes_fde) : cfa_changes_fde =
-  (** Cleanup the result of `of_sub`.
+  let output = {
+    cfa_changes_fde = cfa_changes ;
+    beg_pos = first_addr ;
+    end_pos = last_addr ;
+  } in
 
-      Merges entries at the same address, propagates track lost *)
+  output
 
-  let fold_one addr cfa_change (accu, last_change, lost_track) =
-    match cfa_change, last_change, lost_track with
-    | _, _, true -> (accu, None, lost_track)
-    | CfaLostTrack, _, false ->
-      (AddrMap.add addr cfa_change accu, None, true)
-    | cfa_change, Some prev_change, false when cfa_change = prev_change ->
-      (accu, last_change, false)
-    | cfa_change, _, false ->
-      (AddrMap.add addr cfa_change accu, Some cfa_change, false)
-  in
-
-  match AddrMap.fold fold_one fde_changes (AddrMap.empty, None, false) with
-  | out, _, _ -> out
-
-
-let of_prog prog : cfa_changes =
+let of_prog prog : subroutine_cfa_map =
   (** Extracts the `cfa_changes` of a program *)
   let fold_step accu sub =
     (try
-       let res = cleanup_fde @@ process_sub sub in
-       StrMap.add (BStd.Sub.name sub) res accu
+       let subroutine_data = process_sub sub in
+       StrMap.add (BStd.Sub.name sub) subroutine_data accu
      with
      | InvalidSub -> accu
      | Inconsistent tid ->
@@ -400,7 +456,7 @@ let of_prog prog : cfa_changes =
     ~init:StrMap.empty
     ~f:fold_step
 
-let of_proj proj : cfa_changes =
+let of_proj proj : subroutine_cfa_map =
   (** Extracts the `cfa_changes` of a project *)
   let prog = BStd.Project.program proj in
   of_prog prog

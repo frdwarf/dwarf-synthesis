@@ -31,12 +31,16 @@ let pp_cfa_change ppx addr pos = Simplest.(
       Format.fprintf ppx "%a u        u@." pp_int64_hex addr
   )
 
-let pp_pre_dwarf_readelf ppx pre_dwarf =
-  Simplest.StrMap.iter (fun fde_name entry ->
-      Format.fprintf ppx "FDE %s@." fde_name ;
-      if not (Simplest.AddrMap.is_empty entry) then (
-         Format.fprintf ppx "   LOC           CFA      ra@." ;
-         Simplest.AddrMap.iter (pp_cfa_change ppx) entry ;
-         Format.fprintf ppx "@.")
-    )
-    pre_dwarf
+let pp_pre_dwarf_readelf ppx (pre_dwarf: Simplest.subroutine_cfa_map) =
+  Simplest.(
+    Simplest.StrMap.iter (fun fde_name entry ->
+        Format.fprintf ppx "FDE %s pc=%a..%a@."
+          fde_name pp_int64_hex entry.beg_pos pp_int64_hex entry.end_pos;
+        let cfa_entry = entry.cfa_changes_fde in
+        if not (Simplest.AddrMap.is_empty cfa_entry) then (
+          Format.fprintf ppx "   LOC           CFA      ra@." ;
+          Simplest.AddrMap.iter (pp_cfa_change ppx) cfa_entry ;
+          Format.fprintf ppx "@.")
+      )
+      pre_dwarf
+  )
