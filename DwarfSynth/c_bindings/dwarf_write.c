@@ -6,6 +6,7 @@
 
 #include "dwarf_write.h"
 
+
 struct internal_state {
     Elf *elf;
 };
@@ -255,10 +256,11 @@ static int write_all_fde_instructions(struct dwarfw_fde *fde,
 }
 
 static int process_section(struct internal_state* state,
-        struct pre_dwarf* pre_dwarf, Elf_Scn *s, FILE *f, size_t *written,
-        FILE *rela_f)
+        struct pre_dwarf* pre_dwarf, Elf_Scn *s, FILE *f, size_t *written /*,
+        FILE *rela_f */)
 {
 	size_t shndx = elf_ndxscn(s);
+    fprintf(stderr, "Processing section %lu\n", shndx); //D
 
 	GElf_Sym text_sym;
 	int text_sym_idx = find_section_symbol(state->elf, shndx, &text_sym);
@@ -267,6 +269,12 @@ static int process_section(struct internal_state* state,
 		return 1;
 	}
 
+    GElf_Shdr shdr;
+    gelf_getshdr(s, &shdr);
+    uintptr_t s_addr = shdr.sh_addr,
+              s_endaddr = shdr.sh_addr + shdr.sh_size;
+
+
 	struct dwarfw_cie cie = {
 		.version = 1,
 		.augmentation = "zR",
@@ -274,7 +282,7 @@ static int process_section(struct internal_state* state,
 		.data_alignment = -8,
 		.return_address_register = 16,
 		.augmentation_data = {
-			.pointer_encoding = DW_EH_PE_sdata4 | DW_EH_PE_pcrel,
+			.pointer_encoding = DW_EH_PE_sdata4 /* | DW_EH_PE_pcrel */,
 		},
 	};
 
@@ -288,6 +296,14 @@ static int process_section(struct internal_state* state,
 	// Generate the FDEs
 	for (size_t fde_id = 0; fde_id < pre_dwarf->num_fde; ++fde_id) {
         struct pre_dwarf_fde* cur_fde = &(pre_dwarf->fdes[fde_id]);
+
+        if(!(s_addr <= cur_fde->initial_location
+                    && cur_fde->end_location < s_endaddr))
+            // The fde is not included in this section
+        {
+            continue;
+        }
+        fprintf(stderr, "FDE %lu belongs to this section\n", cur_fde->num); //D
 
 		struct dwarfw_fde fde = {
 			.cie = &cie,
@@ -317,16 +333,17 @@ static int process_section(struct internal_state* state,
 		fde.instructions = instr_buf;
 		fde.cie_pointer = *written;
 
-		GElf_Rela initial_position_rela;
-		if (!(n = dwarfw_fde_write(&fde, &initial_position_rela, f))) {
+		/* GElf_Rela initial_position_rela; */
+		if (!(n = dwarfw_fde_write(&fde, /*&initial_position_rela*/NULL, f))) {
 			fprintf(stderr, "dwarfw_fde_write() failed\n");
 			return -1;
 		}
-		initial_position_rela.r_offset += *written;
+		/* initial_position_rela.r_offset += *written; */
 		*written += n;
 		free(instr_buf);
 
 		// r_offset and r_addend have already been populated by dwarfw_fde_write
+        /*
 		initial_position_rela.r_info = GELF_R_INFO(text_sym_idx,
 			ELF32_R_TYPE(initial_position_rela.r_info));
 
@@ -334,6 +351,7 @@ static int process_section(struct internal_state* state,
 			fprintf(stderr, "can't write rela\n");
 			return 1;
 		}
+        */
 	}
 
 	return 0;
@@ -382,6 +400,7 @@ int write_dwarf(char* objname, struct pre_dwarf* pre_dwarf) {
 		return 1;
 	}
 
+    /*
 	char *rela_buf;
 	size_t rela_len;
 	FILE *rela_f = open_memstream(&rela_buf, &rela_len);
@@ -389,6 +408,7 @@ int write_dwarf(char* objname, struct pre_dwarf* pre_dwarf) {
 		fprintf(stderr, "open_memstream() failed\n");
 		return 1;
 	}
+    */
 
 	size_t written = 0;
 	for (size_t i = 0; i < sections_num; ++i) {
@@ -406,13 +426,12 @@ int write_dwarf(char* objname, struct pre_dwarf* pre_dwarf) {
 			continue;
 		}
 
-		if (process_section(&state, pre_dwarf, s, f, &written, rela_f)) {
+		if (process_section(&state, pre_dwarf, s, f, &written /*, rela_f*/)) {
 			return 1;
 		}
 	}
-
 	fclose(f);
-	fclose(rela_f);
+	/* fclose(rela_f); */
 
 	// Create the .eh_frame section
 	Elf_Scn *scn = create_debug_frame_section(elf, ".eh_frame", buf, len);
@@ -421,6 +440,7 @@ int write_dwarf(char* objname, struct pre_dwarf* pre_dwarf) {
 		return 1;
 	}
 
+    /*
 	// Create the .eh_frame.rela section
 	Elf_Scn *rela = create_rela_section(elf, ".rela.eh_frame", scn,
 		rela_buf, rela_len);
@@ -428,6 +448,7 @@ int write_dwarf(char* objname, struct pre_dwarf* pre_dwarf) {
 		fprintf(stderr, "create_rela_section() failed\n");
 		return 1;
 	}
+    */
 
 	// Write the modified ELF object
 	elf_flagelf(elf, ELF_C_SET, ELF_F_DIRTY);
@@ -437,7 +458,7 @@ int write_dwarf(char* objname, struct pre_dwarf* pre_dwarf) {
 	}
 
 	free(buf);
-	free(rela_buf);
+	/* free(rela_buf); */
 
 	elf_end(elf);
 	close(fd);

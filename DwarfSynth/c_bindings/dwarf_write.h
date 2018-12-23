@@ -6,6 +6,8 @@
 
 #pragma once
 
+#define _XOPEN_SOURCE 700
+
 #include "../../libdwarfw/include/dwarfw.h"
 
 #include <dwarf.h>
@@ -52,3 +54,6 @@ struct pre_dwarf {
     size_t num_fde;
     struct pre_dwarf_fde* fdes;
 };
+
+/// Writes the provided `pre_dwarf` as DWARF in the ELF file at `obj_path`
+int write_dwarf(char* obj_path, struct pre_dwarf* pre_dwarf);

@@ -68,9 +68,9 @@ let convert_pre_c_entries entries : pre_c_pre_dwarf_entry array =
       (fun loc entry _ -> convert_pre_c_entry loc entry)
       entries empty_entry
 
-let convert_pre_c_fde name entry num : pre_c_pre_dwarf_fde =
+let convert_pre_c_fde name entry id : pre_c_pre_dwarf_fde =
   {
-    num = num;
+    num = AddrMap.cardinal entry.cfa_changes_fde;
     initial_location = entry.beg_pos;
     end_location = entry.end_pos;
     name = name;
