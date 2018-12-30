@@ -10,7 +10,7 @@
 
 #include "../../libdwarfw/include/dwarfw.h"
 
-#include <dwarf.h>
+#include <libdwarf/dwarf.h>
 #include <gelf.h>
 #include <string.h>
 #include <stdint.h>

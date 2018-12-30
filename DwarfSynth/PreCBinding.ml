@@ -20,6 +20,10 @@ type pre_c_pre_dwarf = {
   fdes: pre_c_pre_dwarf_fde array
 }
 
+(* OCAML -> C conversion *)
+
+(* external write_dwarf : string -> pre_c_pre_dwarf -> int = "caml__write_dwarf"   *)
+                     
 (* ========================================================================= *)
 
 (** Empty default value for `pre_c_pre_dwarf_entry` *)

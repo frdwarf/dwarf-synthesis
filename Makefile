@@ -1,4 +1,4 @@
-OCAMLBUILD=bapbuild
+OCAMLBUILD=bapbuild -no-hygiene
 BAPBUNDLE=bapbundle
 ROOT_MODULE=dwarfsynth
 
