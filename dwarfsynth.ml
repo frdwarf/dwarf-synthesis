@@ -14,9 +14,10 @@ module Cmdline = struct
   module Cnf = Self.Config
 
   let outfile = Cnf.(
-      param (some string) "output"
-        ~doc:("The file in which the output ELF will be written. Output goes "
-              ^ "to stdout by default.")
+      param (string) "output"
+        ~doc:("The file in which the output marshalled data will be written. "
+              ^ "Output goes to ./tmp.marshal by default.")
+        ~default:"tmp.marshal"
     )
 
   let () = Cnf.(

@@ -13,6 +13,6 @@ int main() {
     };
     struct pre_dwarf dwarf_data = {1, &fde};
 
-    write_dwarf("test.bin", &dwarf_data);
+    write_dwarf("test.bin", "test.bin.eh_frame", &dwarf_data);
     return 0;
 }

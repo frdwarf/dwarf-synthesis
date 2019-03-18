@@ -256,8 +256,8 @@ static int write_all_fde_instructions(struct dwarfw_fde *fde,
 }
 
 static int process_section(struct internal_state* state,
-        struct pre_dwarf* pre_dwarf, Elf_Scn *s, FILE *f, size_t *written /*,
-        FILE *rela_f */)
+        struct pre_dwarf* pre_dwarf, Elf_Scn *s, FILE *f,
+        size_t *written /*, FILE *rela_f */)
 {
 	size_t shndx = elf_ndxscn(s);
     fprintf(stderr, "Processing section %lu\n", shndx); //D
@@ -357,8 +357,12 @@ static int process_section(struct internal_state* state,
 	return 0;
 }
 
-int write_dwarf(char* objname, struct pre_dwarf* pre_dwarf) {
+int write_dwarf(char* objname, char* eh_path, struct pre_dwarf* pre_dwarf) {
 	elf_version(EV_CURRENT);
+
+    FILE* out_dwarf = fopen(eh_path, "a"); // Create file
+    fclose(out_dwarf);
+    out_dwarf = fopen(eh_path, "w"); // Truncate and open for writing
 
 	int fd = open(objname, O_RDWR);
 	if (fd == -1) {
@@ -392,6 +396,7 @@ int write_dwarf(char* objname, struct pre_dwarf* pre_dwarf) {
 
 	struct internal_state state = { .elf = elf };
 
+    /*
 	char *buf;
 	size_t len;
 	FILE *f = open_memstream(&buf, &len);
@@ -399,6 +404,7 @@ int write_dwarf(char* objname, struct pre_dwarf* pre_dwarf) {
 		fprintf(stderr, "open_memstream() failed\n");
 		return 1;
 	}
+    */
 
     /*
 	char *rela_buf;
@@ -426,19 +432,21 @@ int write_dwarf(char* objname, struct pre_dwarf* pre_dwarf) {
 			continue;
 		}
 
-		if (process_section(&state, pre_dwarf, s, f, &written /*, rela_f*/)) {
+		if (process_section(&state, pre_dwarf, s, out_dwarf, &written /*, rela_f*/)) {
 			return 1;
 		}
 	}
-	fclose(f);
+	// fclose(f);
 	/* fclose(rela_f); */
 
 	// Create the .eh_frame section
+    /*
 	Elf_Scn *scn = create_debug_frame_section(elf, ".eh_frame", buf, len);
 	if (scn == NULL) {
 		fprintf(stderr, "create_debug_frame_section() failed\n");
 		return 1;
 	}
+    */
 
     /*
 	// Create the .eh_frame.rela section
@@ -451,17 +459,20 @@ int write_dwarf(char* objname, struct pre_dwarf* pre_dwarf) {
     */
 
 	// Write the modified ELF object
+    /*
 	elf_flagelf(elf, ELF_C_SET, ELF_F_DIRTY);
 	if (elf_update(elf, ELF_C_WRITE) < 0) {
 		fprintf(stderr, "elf_update() failed: %s\n", elf_errmsg(-1));
 		return 1;
 	}
+    */
 
-	free(buf);
+	// free(buf);
 	/* free(rela_buf); */
 
 	elf_end(elf);
 	close(fd);
+    fclose(out_dwarf);
 
 	return 0;
 }

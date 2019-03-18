@@ -142,9 +142,9 @@ struct pre_dwarf * convert_pre_dwarf(value oc_pre_dwarf) {
 }
 
 // OCaml type: string -> pre_c_dwarf -> int
-value caml_write_dwarf (value oc_obj_path, value oc_pre_dwarf) {
+value caml_write_dwarf (value oc_obj_path, value oc_eh_path, value oc_pre_dwarf) {
 
-  char *obj_path;
+  char *obj_path, *eh_path;
   struct pre_dwarf *pre_dwarf;
 
   CAMLparam2(oc_obj_path, oc_pre_dwarf);
@@ -153,9 +153,11 @@ value caml_write_dwarf (value oc_obj_path, value oc_pre_dwarf) {
 
   obj_path = String_val(oc_obj_path);
 
+  eh_path = String_val(oc_eh_path);
+
   pre_dwarf = convert_pre_dwarf(oc_pre_dwarf);
 
   dump_pre_dwarf(*pre_dwarf);
-  
-  CAMLreturn(write_dwarf(obj_path, pre_dwarf));
+
+  CAMLreturn(write_dwarf(obj_path, eh_path, pre_dwarf));
 }

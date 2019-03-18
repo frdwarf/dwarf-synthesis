@@ -55,5 +55,5 @@ struct pre_dwarf {
     struct pre_dwarf_fde* fdes;
 };
 
-/// Writes the provided `pre_dwarf` as DWARF in the ELF file at `obj_path`
-int write_dwarf(char* obj_path, struct pre_dwarf* pre_dwarf);
+/// Writes the provided `pre_dwarf` as DWARF in the file `eh_path`, for the ELF file at `obj_path`
+int write_dwarf(char* obj_path, char* eh_path, struct pre_dwarf* pre_dwarf);
