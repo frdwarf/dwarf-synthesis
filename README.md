@@ -11,9 +11,27 @@ examine its assembly code and, based solely on that, generate the corresponding
 This tool relies on [BAP](https://github.com/BinaryAnalysisPlatform/bap), which
 is available through OPAM.
 
-## Running
+## Compiling
 
-First, run `make` to compile and install the BAP plugin.
+Simply run `make` to compile all the necessary tools, including compiling and
+installing the BAP plugin `dwarfsynth`.
+
+## Running with a wrapper script
+
+To generate an `.eh_frame` section for some binary `foo.bin` and write the
+output as `foo.eh.bin`, you can run
+
+```
+./synthesize_dwarf foo.bin foo.eh.bin
+```
+
+You can also omit the second parameter to simply overwrite `foo.bin`.
+
+## Running by hand
+
+If you want, for some reason, to run by hand the multiple components, you can
+follow this procedure (by using more appropriate file names, and, possibly, a
+temporary directory -- see `mktemp -d`).
 
 ### Running the BAP plugin
 

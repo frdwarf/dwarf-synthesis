@@ -21,3 +21,5 @@ setup.data
 setup.log
 
 *.plugin
+ml_dwarf_write.bin
+tmp.marshal

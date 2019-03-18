@@ -3,7 +3,12 @@ BAPBUNDLE=bapbundle
 ROOT_MODULE=dwarfsynth
 
 
-all: install
+all: install ml_dwarf_write.bin
+
+.PHONY: ml_dwarf_write.bin
+ml_dwarf_write.bin:
+	$(MAKE) -C DwarfSynth/c_bindings
+	ln -fs DwarfSynth/c_bindings/ml_dwarf_write.bin .
 
 .PHONY: $(ROOT_MODULE).plugin
 $(ROOT_MODULE).plugin:
