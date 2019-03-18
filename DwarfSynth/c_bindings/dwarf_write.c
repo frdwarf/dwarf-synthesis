@@ -260,7 +260,6 @@ static int process_section(struct internal_state* state,
         size_t *written /*, FILE *rela_f */)
 {
 	size_t shndx = elf_ndxscn(s);
-    fprintf(stderr, "Processing section %lu\n", shndx); //D
 
 	GElf_Sym text_sym;
 	int text_sym_idx = find_section_symbol(state->elf, shndx, &text_sym);
@@ -303,8 +302,6 @@ static int process_section(struct internal_state* state,
         {
             continue;
         }
-        fprintf(stderr, "FDE %lu belongs to this section\n", cur_fde->num); //D
-
 		struct dwarfw_fde fde = {
 			.cie = &cie,
 			.initial_location = cur_fde->initial_location,

@@ -378,8 +378,6 @@ let cleanup_fde (fde_changes: cfa_changes_fde) : cfa_changes_fde =
 let process_sub sub : subroutine_cfa_data =
   (** Extracts the `cfa_changes_fde` of a subroutine *)
 
-  Format.eprintf "Sub %s...@." @@ BStd.Sub.name sub ;
-
   let cfg = BStd.Sub.to_cfg sub in
   let next_instr_graph = build_next_instr cfg in
 
