@@ -35,7 +35,7 @@ function find_ml_dwarf_write {
 }
 
 function bap_synth {
-    bap "$INPUT_FILE" -p dwarfsynth --dwarfsynth-output "$TMP_DIR/marshal" \
+    bap "$INPUT_FILE" --no-byteweight -p dwarfsynth --dwarfsynth-output "$TMP_DIR/marshal" \
         > /dev/null
     return $?
 }

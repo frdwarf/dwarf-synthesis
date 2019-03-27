@@ -458,3 +458,13 @@ let of_proj proj : subroutine_cfa_map =
   (** Extracts the `cfa_changes` of a project *)
   let prog = BStd.Project.program proj in
   of_prog prog
+
+let clean_lost_track_subs pre_dwarf : subroutine_cfa_map =
+  (** Removes the subroutines on which we lost track from [pre_dwarf] *)
+  let sub_lost_track sub_name (sub: subroutine_cfa_data) =
+    not @@ AddrMap.exists (fun addr pos -> (match pos with
+        | RspOffset _ | RbpOffset _ -> false
+        | CfaLostTrack -> true))
+        sub.cfa_changes_fde
+  in
+  StrMap.filter sub_lost_track pre_dwarf
