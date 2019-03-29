@@ -17,6 +17,7 @@ for _num in $(seq 1 $NB_TESTS); do
     echo -ne "\r>>> $num.c          "
     path="$DIR/$num"
     csmith > "$path.c"
+    sed -i 's/^static \(.* func_\)/\1/g' "$path.c"
     echo -ne "\r>>> $num.bin          "
     gcc -O2 -I/usr/include/csmith-2.3.0/ -w "$path.c" -o "$path.orig.bin"
     objcopy --remove-section '.eh_frame' --remove-section '.eh_frame_hdr' \
