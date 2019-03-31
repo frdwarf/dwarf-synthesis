@@ -5,6 +5,13 @@ class NotFDE(Exception):
     pass
 
 
+def func_name(infos, symtb):
+    for sym in symtb:
+        if infos["beg"] == symtb[sym][0]:
+            return sym
+    return None
+
+
 def parse_fde_head(line):
     spl = line.strip().split()
     assert len(spl) >= 2
@@ -59,7 +66,7 @@ def parse_fde(lines):
     return {"beg": pc_beg, "end": pc_end, "rows": clean_rows(rows)}
 
 
-def parse_eh_frame(handle):
+def parse_eh_frame(handle, symtb):
     output = []
     cur_lines = []
     for line in handle:
@@ -72,7 +79,10 @@ def parse_eh_frame(handle):
             if cur_lines != []:
                 infos = parse_fde(cur_lines)
                 if infos:
-                    output.append(infos)
+                    symname = func_name(infos, symtb)
+                    if symname not in ["_start", "__libc_csu_init"]:
+                        # These functions have weird instructions
+                        output.append(infos)
                 cur_lines = []
         else:
             cur_lines.append(line)
@@ -94,13 +104,15 @@ def match_segments(orig_eh, synth_eh):
                     matches[1][synth_id] = True  # PLT -- fake match
                     continue
                 if matches[1][synth_id]:
-                    print("Multiple matches (synth)")
+                    # print("Multiple matches (synth)")
+                    pass
                 if matches[0][orig_id]:
-                    print(
-                        "Multiple matches (orig) {}--{}".format(
-                            hex(orig_fde["beg"]), hex(orig_fde["end"])
-                        )
-                    )
+                    pass
+                    # print(
+                    #    "Multiple matches (orig) {}--{}".format(
+                    #        hex(orig_fde["beg"]), hex(orig_fde["end"])
+                    #    )
+                    # )
                 else:
                     matches[0][orig_id] = True
                     matches[1][synth_id] = True
@@ -157,27 +169,52 @@ def match_fde(orig, synth):
         ):
             continue
         if cur_val[0] != cur_val[1]:
-            print("Mis {} ; {}".format(cur_val[0], cur_val[1]))
+            # print("Mis {} ; {}".format(cur_val[0], cur_val[1]))
             return False
 
     return True
 
 
+def parse_sym_table(handle):
+    out_map = {}
+    for line in handle:
+        line = line.strip()
+        if line == "===":
+            break
+
+        spl = list(map(lambda x: x.strip(), line.split()))
+        loc = int(spl[1], 16)
+        size = int(spl[2])
+        name = spl[7]
+        out_map[name] = (loc, size)
+    return out_map
+
+
 def main():
-    orig_eh = parse_eh_frame(sys.stdin)
-    synth_eh = parse_eh_frame(sys.stdin)
+    if len(sys.argv) < 2:
+        print("Missing argument: test_name", file=sys.stderr)
+    test_name = sys.argv[1]
+    symtb = parse_sym_table(sys.stdin)
+    orig_eh = parse_eh_frame(sys.stdin, symtb)
+    synth_eh = parse_eh_frame(sys.stdin, symtb)
     matched, unmatched_orig, unmatched_synth = match_segments(orig_eh, synth_eh)
-    print(len(matched), len(unmatched_orig), len(unmatched_synth))
-    dump_light_fdes(unmatched_orig)
-    print("==")
-    dump_light_fdes(unmatched_synth)
+    # dump_light_fdes(unmatched_orig)
+    # dump_light_fdes(unmatched_synth)
 
     mismatches = 0
     for (orig, synth) in matched:
         if not match_fde(orig, synth):
-            print("MISMATCH: {} ; {}".format(fde_pos(orig), fde_pos(synth)))
             mismatches += 1
-    print("TOTAL: {}/{}".format(mismatches, len(matched)))
+    reports = []
+    if mismatches > 0:
+        reports.append("{} mismatches".format(mismatches))
+    if unmatched_orig:
+        reports.append("{} unmatched (orig)".format(len(unmatched_orig)))
+    if unmatched_synth:
+        reports.append("{} unmatched (synth)".format(len(unmatched_synth)))
+
+    if reports:
+        print("{}: {}".format(test_name, "; ".join(reports)))
 
 
 if __name__ == "__main__":
