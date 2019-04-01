@@ -3,7 +3,9 @@
 type pre_c_pre_dwarf_entry = {
   location: int64;
   cfa_offset: int64;
-  cfa_offset_reg: int
+  cfa_offset_reg: int;
+  rbp_defined: bool;
+  rbp_offset: int64  (* Assumed to be offset of CFA *)
 }
 
 type pre_c_pre_dwarf_fde = {

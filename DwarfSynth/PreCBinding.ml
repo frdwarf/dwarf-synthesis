@@ -6,7 +6,9 @@ exception InvalidPreDwarf of string
 type pre_c_pre_dwarf_entry = {
   location: int64;
   cfa_offset: int64;
-  cfa_offset_reg: int
+  cfa_offset_reg: int;
+  rbp_defined: bool;
+  rbp_offset: int64  (* Assumed to be offset of CFA *)
 }
 
 type pre_c_pre_dwarf_fde = {
@@ -32,7 +34,9 @@ type pre_c_pre_dwarf = {
 let empty_entry = {
   location = Int64.zero;
   cfa_offset = Int64.zero;
-  cfa_offset_reg = 0
+  cfa_offset_reg = 0;
+  rbp_defined = false;
+  rbp_offset = Int64.zero
 }
 
 (** Empty default value for `pre_c_pre_dwarf_fde` *)
@@ -57,17 +61,24 @@ module MapTool (MapT: Map.S) = struct
 end
 
 let convert_pre_c_entry loc entry : pre_c_pre_dwarf_entry =
-  let offset, offset_reg = (match entry with
+  let cfa_entry, rbp_entry = entry in
+  let cfa_offset, cfa_offset_reg = (match cfa_entry with
       | RspOffset off -> off, 7
       | RbpOffset off -> off, 6
       | CfaLostTrack ->
         raise (InvalidPreDwarf
                  ("CfaLostTrack should be filtered out beforehand"))
     ) in
+  let rbp_defined, rbp_offset = (match rbp_entry with
+      | RbpUndef -> false, Int64.zero
+      | RbpCfaOffset off -> true, off
+    ) in
   {
     location = loc;
-    cfa_offset = offset;
-    cfa_offset_reg = offset_reg;
+    cfa_offset = cfa_offset;
+    cfa_offset_reg = cfa_offset_reg;
+    rbp_defined = rbp_defined;
+    rbp_offset = rbp_offset
   }
 
 module AddrMapTool = MapTool(AddrMap)
@@ -79,11 +90,11 @@ let convert_pre_c_entries entries : pre_c_pre_dwarf_entry array =
 let convert_pre_c_fde name entry : pre_c_pre_dwarf_fde option =
   try
     Some {
-      num = AddrMap.cardinal entry.cfa_changes_fde;
+      num = AddrMap.cardinal entry.reg_changes_fde;
       initial_location = entry.beg_pos;
       end_location = entry.end_pos;
       name = name;
-      entries = convert_pre_c_entries entry.cfa_changes_fde
+      entries = convert_pre_c_entries entry.reg_changes_fde
     }
   with InvalidPreDwarf reason -> (
       Format.eprintf "FAILED subroutine %s: %s@." name reason ;

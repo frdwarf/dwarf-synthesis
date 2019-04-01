@@ -231,6 +231,11 @@ static int write_fde_instruction(struct dwarfw_fde *fde,
 		return -1;
 	}
 
+  if(cur_entry->rbp_defined)
+    dwarfw_cie_write_offset(fde->cie, 6, cur_entry->rbp_offset, f);
+  else
+    dwarfw_cie_write_undefined(fde->cie, 6, f);
+
 	return 0;
 }
 

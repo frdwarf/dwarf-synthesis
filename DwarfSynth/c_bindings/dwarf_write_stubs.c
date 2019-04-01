@@ -94,6 +94,11 @@ offset_t convert_offset_t(value offset) {
   return (offset_t) int64_of_value(offset);
 }
 
+int convert_bool(value boolval) {
+  CAMLparam1(boolval);
+  return Bool_val(boolval);
+}
+
 struct pre_dwarf_entry * convert_pre_dwarf_entry(value oc_pde) {
 
   struct pre_dwarf_entry *pde = malloc(sizeof(struct pre_dwarf_entry));
@@ -103,6 +108,8 @@ struct pre_dwarf_entry * convert_pre_dwarf_entry(value oc_pde) {
   pde->location = convert_addr_t(Field(oc_pde, 0));
   pde->cfa_offset = convert_offset_t(Field(oc_pde, 1));
   pde->cfa_offset_reg = convert_reg_t(Field(oc_pde, 2));
+  pde->rbp_defined = convert_bool(Field(oc_pde, 3));
+  pde->rbp_offset = convert_offset_t(Field(oc_pde, 4));
 
   return pde;
 }

@@ -10,25 +10,46 @@ let pp_int64_hex ppx number =
   List.iter pp_short @@ List.map (fun x ->
       Int64.(shift_right number (16*x))) [3;2;1;0]
 
-let pp_cfa_change ppx addr pos = Simplest.(
+exception LostTrackCfaDisp
+
+let pp_cfa_change ppx addr reg_pos = Simplest.(
     let num_len num =
       let str_rep = Format.sprintf "%+d" num in
       String.length str_rep
     in
-    let print_row cfa_reg int64_offset =
-      let offset = Int64.to_int int64_offset in
-      let post_offset_spaces = String.make (6 - num_len offset) ' ' in
-      Format.fprintf ppx "%a %s%+d%sc-8@."
-        pp_int64_hex addr cfa_reg offset post_offset_spaces
+    let print_row cfa_reg cfa_int64_offset rbp_offset =
+      let cfa_offset = Int64.to_int cfa_int64_offset in
+      let post_cfa_offset_spaces = String.make (6 - num_len cfa_offset) ' ' in
+      let rbp_str = (match rbp_offset with
+          | None -> "u     "
+          | Some off64 ->
+            let off = Int64.to_int off64 in
+            Format.sprintf "c%+d%s" off (String.make (5 - num_len off) ' ')
+        ) in
+      Format.fprintf ppx "%a %s%+d%s%sc-8@."
+        pp_int64_hex addr cfa_reg cfa_offset post_cfa_offset_spaces rbp_str
     in
 
-    match pos with
-    | RspOffset offset ->
-      print_row "rsp" offset
-    | RbpOffset offset ->
-      print_row "rbp" offset
-    | CfaLostTrack ->
-      Format.fprintf ppx "%a u        u@." pp_int64_hex addr
+    let cfa_pos, rbp_pos = reg_pos in
+
+    (try
+       let cfa_reg, cfa_offset = (match cfa_pos with
+           | RspOffset offset ->
+             "rsp", offset
+           | RbpOffset offset ->
+             "rbp", offset
+           | CfaLostTrack ->
+             raise LostTrackCfaDisp
+         ) in
+       let rbp_offset = (match rbp_pos with
+           | RbpUndef -> None
+           | RbpCfaOffset off -> Some off
+         ) in
+       print_row cfa_reg cfa_offset rbp_offset
+
+     with LostTrackCfaDisp ->
+       Format.fprintf ppx "%a u        u     u@." pp_int64_hex addr
+    )
   )
 
 let pp_pre_dwarf_readelf ppx (pre_dwarf: Simplest.subroutine_cfa_map) =
@@ -36,10 +57,10 @@ let pp_pre_dwarf_readelf ppx (pre_dwarf: Simplest.subroutine_cfa_map) =
     Simplest.StrMap.iter (fun fde_name entry ->
         Format.fprintf ppx "FDE %s pc=%a..%a@."
           fde_name pp_int64_hex entry.beg_pos pp_int64_hex entry.end_pos;
-        let cfa_entry = entry.cfa_changes_fde in
-        if not (Simplest.AddrMap.is_empty cfa_entry) then (
-          Format.fprintf ppx "   LOC           CFA      ra@." ;
-          Simplest.AddrMap.iter (pp_cfa_change ppx) cfa_entry ;
+        let reg_entry = entry.reg_changes_fde in
+        if not (Simplest.AddrMap.is_empty reg_entry) then (
+          Format.fprintf ppx "   LOC           CFA      rbp   ra@." ;
+          Simplest.AddrMap.iter (pp_cfa_change ppx) reg_entry ;
           Format.fprintf ppx "@.")
       )
       pre_dwarf

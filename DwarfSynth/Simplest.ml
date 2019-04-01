@@ -12,12 +12,22 @@ type cfa_pos =
   | RbpOffset of memory_offset
   | CfaLostTrack
 
-type cfa_changes_fde = cfa_pos AddrMap.t
+type rbp_pos =
+  | RbpUndef
+  | RbpCfaOffset of memory_offset
+
+type reg_pos = cfa_pos * rbp_pos
+
+type reg_changes_fde = reg_pos AddrMap.t
 
 type subroutine_cfa_data = {
-  cfa_changes_fde: cfa_changes_fde;
+  reg_changes_fde: reg_changes_fde;
   beg_pos: memory_address;
   end_pos: memory_address;
+}
+
+type block_local_state = {
+  rbp_vars: BStd.Var.Set.t
 }
 
 module StrMap = Map.Make(String)
@@ -26,6 +36,7 @@ type subroutine_cfa_map = subroutine_cfa_data StrMap.t
 module TIdMap = Map.Make(BStd.Tid)
 
 exception InvalidSub
+exception UnexpectedRbpSet
 
 let pp_cfa_pos ppx = function
   | RspOffset off -> Format.fprintf ppx "RSP + (%s)" (Int64.to_string off)
@@ -200,57 +211,186 @@ let is_single_free_reg expr =
    | _ -> None
   )
 
-let process_def def (cur_cfa: cfa_pos)
-  : (cfa_pos option) =
-  let lose_track = Some (CfaLostTrack) in
+let process_def (local_state: block_local_state) def (cur_reg: reg_pos)
+  : (reg_pos option * block_local_state) =
+  let lose_track = Some CfaLostTrack in
 
-  (match cur_cfa, Regs.X86_64.of_var (BStd.Def.lhs def) with
-   | RspOffset(cur_offset), Some reg when reg = Regs.X86_64.rsp ->
-     let exp = BStd.Def.rhs def in
-     (match is_single_free_reg exp with
-      | Some (bil_var, dw_var) when dw_var = Regs.X86_64.rsp ->
-           let interpreted = interpret_var_expr bil_var cur_offset exp in
-           (match interpreted with
-            | None -> lose_track
-            | Some new_offset ->
-              Some (RspOffset(new_offset))
-           )
-      | _ -> lose_track
-     )
-   | RspOffset(cur_offset), Some reg when reg = Regs.X86_64.rbp ->
-     (* We have CFA=rsp+k and a line %rbp <- [expr]. Might be a %rbp <- %rsp *)
-     let exp = BStd.Def.rhs def in
-     (match is_single_free_reg exp with
-      | Some (bil_var, dw_var) when dw_var = Regs.X86_64.rsp ->
-        (* We have %rbp := F(%rsp) *)
-        (* FIXME we wish to have %rbp := %rsp. An ugly and non-robust test to
-           check that would be interpret F(0), expecting that F is at worst
-           affine - then a restult of 0 means that %rbp := %rsp + 0 *)
-        let interpreted = interpret_var_expr bil_var (Int64.zero) exp in
-        (match interpreted with
-         | Some offset when offset = Int64.zero ->
-           Some (RbpOffset(cur_offset))
-         | _ ->
-           (* Previous instruction was rsp-indexed, here we put something weird
-              in %rbp, let's keep indexing with rsp and do nothing *)
-           None
-        )
-     | _ -> None
-     )
-   | RbpOffset(cur_offset), Some reg when reg = Regs.X86_64.rbp ->
+  let cur_cfa, cur_rbp = cur_reg in
+  let out_cfa =
+    (match cur_cfa, Regs.X86_64.of_var (BStd.Def.lhs def) with
+     | RspOffset(cur_offset), Some reg when reg = Regs.X86_64.rsp ->
+       let exp = BStd.Def.rhs def in
+       (match is_single_free_reg exp with
+        | Some (bil_var, dw_var) when dw_var = Regs.X86_64.rsp ->
+          let interpreted = interpret_var_expr bil_var cur_offset exp in
+          (match interpreted with
+           | None -> lose_track
+           | Some new_offset ->
+             Some (RspOffset(new_offset))
+          )
+        | _ -> lose_track
+       )
+     | RspOffset(cur_offset), Some reg when reg = Regs.X86_64.rbp ->
+       (* We have CFA=rsp+k and a line %rbp <- [expr].
+          Might be a %rbp <- %rsp *)
+       let exp = BStd.Def.rhs def in
+       (match is_single_free_reg exp with
+        | Some (bil_var, dw_var) when dw_var = Regs.X86_64.rsp ->
+          (* We have %rbp := F(%rsp) *)
+          (* FIXME we wish to have %rbp := %rsp. An ugly and non-robust test to
+             check that would be interpret F(0), expecting that F is at worst
+             affine - then a restult of 0 means that %rbp := %rsp + 0 *)
+          let interpreted = interpret_var_expr bil_var (Int64.zero) exp in
+          (match interpreted with
+           | Some offset when offset = Int64.zero ->
+             Some (RbpOffset(cur_offset))
+           | _ ->
+             (* Previous instruction was rsp-indexed, here we put something
+                weird in %rbp, let's keep indexing with rsp and do nothing *)
+             None
+          )
+        | _ -> None
+       )
+     | RbpOffset(cur_offset), Some reg when reg = Regs.X86_64.rbp ->
        (* Assume we are overwriting %rbp with something — we must revert to
           some rsp-based indexing *)
        (* FIXME don't assume the rsp offset will always be 8, find a smart way
           to figure this out *)
        Some (RspOffset(Int64.of_int 8))
-   | _ -> None)
+     | _ -> None)
+  in
 
-let process_jmp jmp (cur_cfa: cfa_pos)
-  : (cfa_pos option) =
+  let is_rbp_save_expr expr local_state =
+    let free_vars = BStd.Exp.free_vars expr in
+    let card = BStd.Var.Set.length free_vars in
+    let has_mem_var = BStd.Var.Set.exists
+       ~f:(fun x -> BStd.Var.name x = "mem")
+       free_vars in
+    let free_x86_regs = Regs.X86_64.map_varset free_vars in
+    let has_rsp_var = free_x86_regs
+                      |> Regs.DwRegOptSet.exists
+                        (fun x -> match x with
+                           | Some x when x = Regs.X86_64.rsp -> true
+                           | _ -> false) in
+    let has_rbp_var = free_x86_regs
+                      |> Regs.DwRegOptSet.exists
+                        (fun x -> match x with
+                           | Some x when x = Regs.X86_64.rbp -> true
+                           | _ -> false) in
+    let has_intermed_rbp_var = free_vars
+                             |> BStd.Var.Set.inter local_state.rbp_vars
+                             |> BStd.Var.Set.is_empty
+                             |> not in
+    (card = 3 && has_mem_var && has_rsp_var &&
+     (has_rbp_var || has_intermed_rbp_var))
+  in
+
+  let is_pop_expr expr =
+    let free_vars = BStd.Exp.free_vars expr in
+    let free_x86_regs = Regs.X86_64.map_varset free_vars in
+    (match Regs.DwRegOptSet.cardinal free_x86_regs with
+     | 2 ->
+       let reg = free_x86_regs
+                 |> Regs.DwRegOptSet.filter
+                   (fun x -> match x with None -> false | Some _ -> true)
+                 |> Regs.DwRegOptSet.choose in
+       let has_mem_var = BStd.Var.Set.exists
+         ~f:(fun x -> BStd.Var.name x = "mem")
+         free_vars in
+       (match reg, has_mem_var with
+        | Some dw_var, true when dw_var = Regs.X86_64.rsp -> true
+        | _ -> false)
+     | _ -> false
+    )
+  in
+
+  let is_rbp_expr expr =
+    let free_vars = BStd.Exp.free_vars expr in
+    let free_x86_regs = Regs.X86_64.map_varset free_vars in
+    (match Regs.DwRegOptSet.cardinal free_x86_regs with
+     | 1 ->
+       let reg = Regs.DwRegOptSet.choose free_x86_regs in
+       (match reg with
+        | Some dwreg when dwreg = Regs.X86_64.rbp -> true
+        | _ -> false)
+     | _ -> false)
+  in
+
+  let gather_rbp_intermed_var def cur_state =
+    (* If `def` is `some intermed. var <- rbp`, add this information in the
+       local state *)
+    (match is_rbp_expr @@ BStd.Def.rhs def with
+     | true ->
+       let lhs_var = BStd.Def.lhs def in
+       if (BStd.Var.is_virtual lhs_var
+           && BStd.Var.typ lhs_var = BStd.reg64_t) then
+         (
+           (* This `def` is actually of the type we want to store. *)
+           let n_rbp_vars = BStd.Var.Set.add cur_state.rbp_vars lhs_var in
+           { cur_state with rbp_vars = n_rbp_vars }
+         )
+       else
+         cur_state
+     | false -> cur_state
+    )
+  in
+
+  let out_rbp, new_state =
+    (match cur_rbp with
+     | RbpUndef ->
+       let cur_state = gather_rbp_intermed_var def local_state in
+       (* We assume that an expression is saving %rbp on the stack at the
+          address %rip when the current def is an expression of the kind
+          `MEM <- F(MEM, %rip, v)` where `v` is either `%rbp` or some
+          intermediary variable holding `%rbp`.
+          This approach is sound when %rbp is saved using a `push`, but
+          probably wrong when saved using a `mov` on some stack-space allocated
+          previously (eg. for multiple registers saved at once).
+          It would be far better to actually read the position at which `v` is
+          saved, but this requires parsing the actual rhs expression, which is
+          not easily done: FIXME
+       *)
+
+       let new_rbp =
+         if (BStd.Var.name @@ BStd.Def.lhs def = "mem"
+             && is_rbp_save_expr (BStd.Def.rhs def) cur_state)
+         then
+           (match cur_cfa with
+            | RspOffset off ->
+              Some (RbpCfaOffset (Int64.mul Int64.minus_one off))
+            | _ -> raise UnexpectedRbpSet
+           )
+         else
+           None
+       in
+
+       new_rbp, cur_state
+     | RbpCfaOffset offs ->
+       (* We go back to RbpUndef when encountering something like a `pop rbp`,
+          that is, RBP <- f(RSP, mem) *)
+       (match Regs.X86_64.of_var (BStd.Def.lhs def),
+              is_pop_expr @@ BStd.Def.rhs def with
+       | Some reg, true when reg = Regs.X86_64.rbp ->
+         Some RbpUndef, local_state
+       | _ -> None, local_state
+       )
+    )
+  in
+
+  (match out_cfa, out_rbp with
+  | None, None -> None
+  | Some cfa, None -> Some (cfa, cur_rbp)
+  | None, Some rbp -> Some (cur_cfa, rbp)
+  | Some cfa, Some rbp -> Some (cfa, rbp)),
+  new_state
+
+let process_jmp jmp (cur_reg: reg_pos)
+  : (reg_pos option) =
+  let cur_cfa, cur_rbp = cur_reg in
   let gen_change = match cur_cfa with
     | RspOffset cur_offset -> (fun off ->
         let new_offset = Int64.add cur_offset (Int64.of_int off) in
-        Some (RspOffset(new_offset))
+        Some (RspOffset(new_offset), cur_rbp)
       )
     | _ -> (fun _ -> None)
   in
@@ -261,30 +401,34 @@ let process_jmp jmp (cur_cfa: cfa_pos)
   | _ -> None
 
 let process_blk
-    next_instr_graph (block_init: cfa_pos) blk : (cfa_changes_fde * cfa_pos) =
-  (** Extracts the CFA changes of a block. *)
+    next_instr_graph (block_init: reg_pos) blk : (reg_changes_fde * reg_pos) =
+  (** Extracts the registers (CFA+RBP) changes of a block. *)
 
-  let apply_offset cur_addr_opt ((accu:cfa_changes_fde), cur_cfa) = function
-    | None -> (accu, cur_cfa)
-    | Some pos ->
-      let cur_addr = (match cur_addr_opt with
-          | None -> assert false
-          | Some x -> to_int64_addr x) in
-      (AddrSet.fold (fun n_addr cur_accu ->
-           AddrMap.add n_addr pos cur_accu)
-          (AddrMap.find cur_addr next_instr_graph)
-          accu),
-      pos
+  let apply_offset cur_addr_opt ((accu:reg_changes_fde), cur_reg, local_state)
+    = function
+      | None -> (accu, cur_reg, local_state)
+      | Some reg_pos ->
+        let cur_addr = (match cur_addr_opt with
+            | None -> assert false
+            | Some x -> to_int64_addr x) in
+        (AddrSet.fold (fun n_addr cur_accu ->
+             AddrMap.add n_addr reg_pos cur_accu)
+            (AddrMap.find cur_addr next_instr_graph)
+            accu),
+        reg_pos,
+        local_state
   in
 
-  let fold_elt (accu, cur_cfa) elt = match elt with
+  let fold_elt (accu, cur_reg, cur_local_state) elt = match elt with
     | `Def(def) ->
+      let new_offset, new_state = process_def cur_local_state def cur_reg in
       apply_offset
-        (opt_addr_of def) (accu, cur_cfa) @@ process_def def cur_cfa
+        (opt_addr_of def) (accu, cur_reg, new_state) new_offset
     | `Jmp(jmp) ->
       apply_offset
-        (opt_addr_of jmp) (accu, cur_cfa) @@ process_jmp jmp cur_cfa
-    | _ -> (accu, cur_cfa)
+        (opt_addr_of jmp) (accu, cur_reg, cur_local_state)
+      @@ process_jmp jmp cur_reg
+    | _ -> (accu, cur_reg, cur_local_state)
   in
 
   let init_changes = (match opt_addr_of blk with
@@ -294,11 +438,14 @@ let process_blk
         AddrMap.singleton blk_address block_init
     ) in
 
+  let empty_local_state = {
+    rbp_vars = BStd.Var.Set.empty
+  } in
   let elts_seq = BStd.Blk.elts blk in
-  let out, end_cfa = BStd.Seq.fold elts_seq
-    ~init:(init_changes, block_init)
+  let out_reg, end_reg, _ = BStd.Seq.fold elts_seq
+    ~init:(init_changes, block_init, empty_local_state)
     ~f:fold_elt in
-  out, end_cfa
+  out_reg, end_reg
 
 exception Inconsistent of BStd.tid
 
@@ -356,20 +503,20 @@ let find_last_addr sub =
   | None -> Int64.zero
   | Some x -> x
 
-let cleanup_fde (fde_changes: cfa_changes_fde) : cfa_changes_fde =
+let cleanup_fde (fde_changes: reg_changes_fde) : reg_changes_fde =
   (** Cleanup the result of `of_sub`.
 
       Merges entries at the same address, propagates track lost *)
 
-  let fold_one addr cfa_change (accu, last_change, lost_track) =
-    match cfa_change, last_change, lost_track with
+  let fold_one addr reg_change (accu, last_change, lost_track) =
+    match reg_change, last_change, lost_track with
     | _, _, true -> (accu, None, lost_track)
-    | CfaLostTrack, _, false ->
-      (AddrMap.add addr cfa_change accu, None, true)
-    | cfa_change, Some prev_change, false when cfa_change = prev_change ->
+    | (CfaLostTrack, _), _, false ->
+      (AddrMap.add addr reg_change accu, None, true)
+    | reg_change, Some prev_change, false when reg_change = prev_change ->
       (accu, last_change, false)
-    | cfa_change, _, false ->
-      (AddrMap.add addr cfa_change accu, Some cfa_change, false)
+    | reg_change, _, false ->
+      (AddrMap.add addr reg_change accu, Some reg_change, false)
   in
 
   match AddrMap.fold fold_one fde_changes (AddrMap.empty, None, false) with
@@ -387,7 +534,9 @@ let process_sub sub : subroutine_cfa_data =
   let initial_cfa_rsp_offset = Int64.of_int 8 in
 
   let rec dfs_process
-      (sub_changes: (cfa_changes_fde * cfa_pos) TIdMap.t) node entry_offset =
+      (sub_changes: (reg_changes_fde * reg_pos) TIdMap.t)
+      node
+      (entry_offset: reg_pos) =
     (** Processes one block *)
 
     let cur_blk = CFG.Node.label node in
@@ -396,12 +545,12 @@ let process_sub sub : subroutine_cfa_data =
     match (TIdMap.find_opt tid sub_changes) with
     | None ->
       (* Not yet visited: compute the changes *)
-      let cur_blk_changes, end_cfa =
+      let cur_blk_changes, end_reg =
         process_blk next_instr_graph entry_offset cur_blk in
       let n_sub_changes =
         TIdMap.add tid (cur_blk_changes, entry_offset) sub_changes in
       BStd.Seq.fold (CFG.Node.succs node cfg)
-        ~f:(fun accu child -> dfs_process accu child end_cfa)
+        ~f:(fun accu child -> dfs_process accu child end_reg)
         ~init:n_sub_changes
     | Some (_, former_entry_offset) ->
       (* Already visited: check that entry values are matching *)
@@ -412,7 +561,7 @@ let process_sub sub : subroutine_cfa_data =
   in
 
   let entry_blk = get_entry_blk cfg in
-  let initial_offset = (RspOffset initial_cfa_rsp_offset) in
+  let initial_offset = (RspOffset initial_cfa_rsp_offset, RbpUndef) in
   let changes_map = dfs_process TIdMap.empty entry_blk initial_offset in
 
   let merged_changes = TIdMap.fold
@@ -425,10 +574,10 @@ let process_sub sub : subroutine_cfa_data =
     changes_map
     AddrMap.empty in
 
-  let cfa_changes = cleanup_fde merged_changes in
+  let reg_changes = cleanup_fde merged_changes in
 
   let output = {
-    cfa_changes_fde = cfa_changes ;
+    reg_changes_fde = reg_changes ;
     beg_pos = first_addr ;
     end_pos = last_addr ;
   } in
@@ -462,9 +611,11 @@ let of_proj proj : subroutine_cfa_map =
 let clean_lost_track_subs pre_dwarf : subroutine_cfa_map =
   (** Removes the subroutines on which we lost track from [pre_dwarf] *)
   let sub_lost_track sub_name (sub: subroutine_cfa_data) =
-    not @@ AddrMap.exists (fun addr pos -> (match pos with
+    not @@ AddrMap.exists (fun addr pos ->
+        let cfa_pos, _ = pos in
+        (match cfa_pos with
         | RspOffset _ | RbpOffset _ -> false
         | CfaLostTrack -> true))
-        sub.cfa_changes_fde
+        sub.reg_changes_fde
   in
   StrMap.filter sub_lost_track pre_dwarf

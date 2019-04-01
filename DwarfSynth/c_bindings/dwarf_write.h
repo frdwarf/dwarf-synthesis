@@ -41,6 +41,8 @@ struct pre_dwarf_entry {
     addr_t location;
     reg_t cfa_offset_reg;
     offset_t cfa_offset;
+    int rbp_defined;
+    offset_t rbp_offset;
 };
 
 struct pre_dwarf_fde {
