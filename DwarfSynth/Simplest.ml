@@ -255,10 +255,13 @@ let process_def (local_state: block_local_state) def (cur_reg: reg_pos)
        (* Assume we are overwriting %rbp with something — we must revert to
           some rsp-based indexing *)
        (* FIXME don't assume the rsp offset will always be 8, find a smart way
-          to figure this out *)
-       Some (RspOffset(Int64.of_int 8))
-     | _ -> None)
-  in
+          to figure this out.
+          We actually use offset 16 because the `pop` will occur after the
+          value is read from the stack.
+       *)
+       Some (RspOffset(Int64.of_int 16))
+     | _ -> None
+    ) in
 
   let is_rbp_save_expr expr local_state =
     let free_vars = BStd.Exp.free_vars expr in
