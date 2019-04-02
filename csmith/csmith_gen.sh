@@ -9,6 +9,15 @@ fi
 
 DIR=$1
 NB_TESTS=$2
+shift ; shift
+
+check_gen_eh_frame=0
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--check-gen-eh-frame" ] ; then
+        check_gen_eh_frame=1
+    fi
+    shift
+done
 
 mkdir -p "$DIR"
 echo -n ">>>          "
@@ -24,6 +33,10 @@ for _num in $(seq 1 $NB_TESTS); do
         "$path.orig.bin" "$path.bin"
     echo -ne "\r>>> $num.eh.bin          "
     ../synthesize_dwarf.sh "$path.bin" "$path.eh.bin"
+
+    if [ "$check_gen_eh_frame" -gt 0 ] ; then
+        ./check_generated_eh_frame.sh "$path"
+    fi
 done
 
 echo ""

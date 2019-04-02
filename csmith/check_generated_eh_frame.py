@@ -1,4 +1,8 @@
+#!/usr/bin/env python3
 import sys
+import argparse
+
+verbose = False
 
 
 class NotFDE(Exception):
@@ -104,15 +108,15 @@ def match_segments(orig_eh, synth_eh):
                     matches[1][synth_id] = True  # PLT -- fake match
                     continue
                 if matches[1][synth_id]:
-                    # print("Multiple matches (synth)")
-                    pass
+                    if verbose:
+                        print("Multiple matches (synth)")
                 if matches[0][orig_id]:
-                    pass
-                    # print(
-                    #    "Multiple matches (orig) {}--{}".format(
-                    #        hex(orig_fde["beg"]), hex(orig_fde["end"])
-                    #    )
-                    # )
+                    if verbose:
+                        print(
+                            "Multiple matches (orig) {}--{}".format(
+                                hex(orig_fde["beg"]), hex(orig_fde["end"])
+                            )
+                        )
                 else:
                     matches[0][orig_id] = True
                     matches[1][synth_id] = True
@@ -161,6 +165,7 @@ def match_fde(orig, synth):
             rowchanges.append((typ, row))
     rowchanges.sort(key=loc_of)
 
+    matching = True
     for rowid, rowch in enumerate(rowchanges):
         typ, row = rowch[0], rowch[1]
         cur_val[typ] = vals_of(row)
@@ -169,10 +174,15 @@ def match_fde(orig, synth):
         ):
             continue
         if cur_val[0] != cur_val[1]:
-            # print("Mis {} ; {}".format(cur_val[0], cur_val[1]))
-            return False
+            if verbose:
+                print(
+                    "Mismatch {}: {} ; {}".format(
+                        hex(row["LOC"]), cur_val[0], cur_val[1]
+                    )
+                )
+            matching = False
 
-    return True
+    return matching
 
 
 def parse_sym_table(handle):
@@ -190,10 +200,24 @@ def parse_sym_table(handle):
     return out_map
 
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Display verbose results"
+    )
+    parser.add_argument(
+        "test_name",
+        action="store",
+        help="Base path of the test case (eg. some_test/01)",
+    )
+    return parser.parse_args()
+
+
 def main():
-    if len(sys.argv) < 2:
-        print("Missing argument: test_name", file=sys.stderr)
-    test_name = sys.argv[1]
+    global verbose
+    parser_args = parse_args()
+    test_name = parser_args.test_name
+    verbose = parser_args.verbose
     symtb = parse_sym_table(sys.stdin)
     orig_eh = parse_eh_frame(sys.stdin, symtb)
     synth_eh = parse_eh_frame(sys.stdin, symtb)
