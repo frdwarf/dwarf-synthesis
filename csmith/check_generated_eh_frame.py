@@ -32,10 +32,15 @@ def parse_fde_head(line):
     return pc_beg, pc_end
 
 
-def parse_fde_row(line, ra_col):
+def parse_fde_row(line, ra_col, rbp_col):
     vals = list(map(lambda x: x.strip(), line.split()))
     assert len(vals) > ra_col  # ra is the rightmost useful column
-    out = {"LOC": int(vals[0], 16), "CFA": vals[1], "ra": vals[ra_col]}
+    out = {
+        "LOC": int(vals[0], 16),
+        "CFA": vals[1],
+        "rbp": vals[rbp_col] if rbp_col else "u",
+        "ra": vals[ra_col],
+    }
     return out
 
 
@@ -58,14 +63,18 @@ def parse_fde(lines):
     except NotFDE:
         return
 
-    rows = [{"LOC": 0, "CFA": "rsp+8", "ra": "c-8"}]  # Implicit CIE row
+    rows = [{"LOC": 0, "CFA": "rsp+8", "rbp": "u", "ra": "c-8"}]  # Implicit CIE row
 
     if len(lines) >= 2:  # Has content
         head_row = list(map(lambda x: x.strip(), lines[1].split()))
         ra_col = head_row.index("ra")
+        try:
+            rbp_col = head_row.index("rbp")
+        except ValueError:
+            rbp_col = None
 
         for line in lines[2:]:
-            rows.append(parse_fde_row(line, ra_col))
+            rows.append(parse_fde_row(line, ra_col, rbp_col))
 
     return {"beg": pc_beg, "end": pc_end, "rows": clean_rows(rows)}
 
@@ -151,7 +160,7 @@ def dump_light_fdes(fdes):
 
 def match_fde(orig, synth):
     def vals_of(row):
-        return {"CFA": row["CFA"], "ra": row["ra"]}
+        return {"CFA": row["CFA"], "ra": row["ra"], "rbp": row["rbp"]}
 
     def loc_of(rch):
         return rch[1]["LOC"]
@@ -165,7 +174,7 @@ def match_fde(orig, synth):
             rowchanges.append((typ, row))
     rowchanges.sort(key=loc_of)
 
-    matching = True
+    mismatch_count = 0
     for rowid, rowch in enumerate(rowchanges):
         typ, row = rowch[0], rowch[1]
         cur_val[typ] = vals_of(row)
@@ -180,12 +189,17 @@ def match_fde(orig, synth):
                         hex(row["LOC"]), cur_val[0], cur_val[1]
                     )
                 )
-            matching = False
+            mismatch_count += 1
 
-    return matching
+    return mismatch_count
 
 
 def parse_sym_table(handle):
+    def readint(x):
+        if x.startswith("0x"):
+            return int(x[2:], 16)
+        return int(x)
+
     out_map = {}
     for line in handle:
         line = line.strip()
@@ -194,7 +208,7 @@ def parse_sym_table(handle):
 
         spl = list(map(lambda x: x.strip(), line.split()))
         loc = int(spl[1], 16)
-        size = int(spl[2])
+        size = readint(spl[2])
         name = spl[7]
         out_map[name] = (loc, size)
     return out_map
@@ -227,8 +241,7 @@ def main():
 
     mismatches = 0
     for (orig, synth) in matched:
-        if not match_fde(orig, synth):
-            mismatches += 1
+        mismatches += match_fde(orig, synth)
     reports = []
     if mismatches > 0:
         reports.append("{} mismatches".format(mismatches))
