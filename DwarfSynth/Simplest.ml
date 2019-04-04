@@ -120,78 +120,72 @@ let map_option f = function
   | None -> None
   | Some x -> Some (f x)
 
-let build_next_instr graph =
+let build_next_instr (disasm: BStd.disasm): AddrSet.t AddrMap.t =
   (** Build a map of memory_address -> AddrSet.t holding, for each address, the
       set of instructions coming right after the instruction at given address.
       There might be multiple such addresses, if the current instruction is at
       a point of branching.  *)
 
-  let addresses_in_block blk =
-    (** Set of addresses present in the block *)
-    BStd.Seq.fold (BStd.Blk.elts blk)
-      ~init:AddrSet.empty
-      ~f:(fun accu elt ->
-          let addr = opt_addr_of_blk_elt elt in
-          match addr with
-          | None -> accu
-          | Some x ->
-            (try
-               AddrSet.add (BStd.Word.to_int64_exn x) accu
-             with _ -> accu)
-        )
+  let rec build_of_instr_list cur_map = function
+    (** Maps an instruction to its following instruction in this block *)
+    | (cur_mem, cur_insn) :: ((next_mem, next_insn) as elt2) :: tl ->
+      (* Its only successor is next_insn *)
+      let new_map =
+        (try
+           let cur_addr = to_int64_addr @@ BStd.Memory.min_addr cur_mem
+           and next_addr = to_int64_addr @@ BStd.Memory.min_addr next_mem in
+           AddrMap.add cur_addr (AddrSet.singleton next_addr) cur_map
+         with _ -> cur_map)
+        in
+        build_of_instr_list new_map (elt2 :: tl)
+    | (cur_mem, _) :: [] ->
+      let last_addr = (try Some (to_int64_addr @@ BStd.Memory.min_addr cur_mem)
+                       with _ -> None) in
+      cur_map, last_addr
+
+      (* Ignore the last one: its successors are held in the graph *)
+    | [] ->
+      cur_map, None
   in
 
-  let node_successors_addr (nd: CFG.node) : AddrSet.t =
-    let rec do_find_succ accu nd =
-      let fold_one accu c_node =
-        match entrypoint_address (CFG.Node.label c_node) with
-        | Some addr ->
-          (try
-             AddrSet.add (BStd.Word.to_int64_exn addr) accu
-           with _ -> accu)
-        | None -> do_find_succ accu c_node
-      in
+  let cfg = BStd.Disasm.cfg disasm in
 
-      let succ = CFG.Node.succs nd graph in
-      BStd.Seq.fold succ
-        ~init:accu
-        ~f:fold_one
-    in
-    do_find_succ AddrSet.empty nd
+  let rec block_addresses block =
+    (try BStd.Block.addr block
+         |> to_int64_addr
+         |> AddrSet.singleton
+     with _ ->
+       (* Probably an intermediary node, eg. JMP --> [inermed node] --> BLK *)
+       let outputs = BStd.Graphs.Cfg.Node.outputs block cfg
+                     |> BStd.Seq.map ~f:BStd.Graphs.Cfg.Edge.dst in
+       BStd.Seq.fold outputs
+         ~init:AddrSet.empty
+         ~f:(fun accu block -> AddrSet.union (block_addresses block) accu)
+    )
   in
 
-  let build_of_block accu_map node =
-    let blk = CFG.Node.label node in
-    let node_successors = node_successors_addr node in
-    let instr_addresses = AddrSet.elements @@ addresses_in_block blk in
-
-    let rec accumulate_mappings mappings addr_list = function
-      | None -> mappings
-      | Some (instr, instr_seq) as cur_instr ->
-        let instr_addr = opt_addr_of_blk_elt instr in
-        match (map_option to_int64_addr instr_addr), addr_list with
-        | None, _ ->
-          accumulate_mappings mappings addr_list @@ BStd.Seq.next instr_seq
-        | Some cur_addr, next_addr::t when cur_addr >= next_addr ->
-          accumulate_mappings mappings t cur_instr
-        | Some cur_addr, next_addr::_ ->
-          let n_mappings = AddrMap.add
-              cur_addr (AddrSet.singleton next_addr) mappings in
-          accumulate_mappings n_mappings addr_list @@ BStd.Seq.next instr_seq
-        | Some cur_addr, [] ->
-          let n_mappings = AddrMap.add
-              cur_addr node_successors mappings in
-          accumulate_mappings n_mappings addr_list @@ BStd.Seq.next instr_seq
-    in
-    accumulate_mappings
-      accu_map
-      instr_addresses
-      (BStd.Seq.next @@ BStd.Blk.elts blk)
+  let build_of_block cur_map block =
+    let cur_map, last_addr =
+      build_of_instr_list cur_map (BStd.Block.insns block) in
+    (match last_addr with
+     | Some last_addr ->
+       let following_set = BStd.Graphs.Cfg.Node.outputs block cfg
+                           |> BStd.Seq.fold
+                             ~init:AddrSet.empty
+                             ~f:(fun set edge -> AddrSet.union
+                                    (block_addresses
+                                       (BStd.Graphs.Cfg.Edge.dst edge))
+                                    set)
+       in
+       AddrMap.add last_addr following_set cur_map
+     | None -> cur_map
+    )
   in
 
-  BStd.Seq.fold (CFG.nodes graph)
+  BStd.Seq.fold (BStd.Graphs.Cfg.nodes cfg)
     ~init:AddrMap.empty
     ~f:build_of_block
+
 
 let find_rbp_pop_set cfg entry =
   (** Returns a BStd.Tid.Set.t of the terms actually "popping" %rbp, that is,
@@ -621,11 +615,10 @@ let cleanup_fde (fde_changes: reg_changes_fde) : reg_changes_fde =
   match AddrMap.fold fold_one fde_changes (AddrMap.empty, None, false) with
   | out, _, _ -> out
 
-let process_sub sub : subroutine_cfa_data =
+let process_sub sub next_instr_graph : subroutine_cfa_data =
   (** Extracts the `cfa_changes_fde` of a subroutine *)
 
   let cfg = BStd.Sub.to_cfg sub in
-  let next_instr_graph = build_next_instr cfg in
 
   let first_addr = int64_addr_of sub in
   let last_addr = find_last_addr sub in
@@ -689,11 +682,11 @@ let process_sub sub : subroutine_cfa_data =
 
   output
 
-let of_prog prog : subroutine_cfa_map =
+let of_prog prog next_instr_graph : subroutine_cfa_map =
   (** Extracts the `cfa_changes` of a program *)
   let fold_step accu sub =
     (try
-       let subroutine_data = process_sub sub in
+       let subroutine_data = process_sub sub next_instr_graph in
        StrMap.add (BStd.Sub.name sub) subroutine_data accu
      with
      | InvalidSub -> accu
@@ -711,8 +704,9 @@ let of_prog prog : subroutine_cfa_map =
 let of_proj no_rbp_undef proj : subroutine_cfa_map =
   (** Extracts the `cfa_changes` of a project *)
   __settings.no_rbp_undef <- no_rbp_undef ;
+  let next_instr_graph = build_next_instr (BStd.Project.disasm proj) in
   let prog = BStd.Project.program proj in
-  of_prog prog
+  of_prog prog next_instr_graph
 
 let clean_lost_track_subs pre_dwarf : subroutine_cfa_map =
   (** Removes the subroutines on which we lost track from [pre_dwarf] *)
