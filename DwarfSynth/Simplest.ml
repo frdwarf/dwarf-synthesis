@@ -120,7 +120,9 @@ let map_option f = function
   | None -> None
   | Some x -> Some (f x)
 
-let build_next_instr (disasm: BStd.disasm): AddrSet.t AddrMap.t =
+exception Block_not_in_subroutine
+
+let build_next_instr sub_ranges (disasm: BStd.disasm): AddrSet.t AddrMap.t =
   (** Build a map of memory_address -> AddrSet.t holding, for each address, the
       set of instructions coming right after the instruction at given address.
       There might be multiple such addresses, if the current instruction is at
@@ -138,9 +140,10 @@ let build_next_instr (disasm: BStd.disasm): AddrSet.t AddrMap.t =
          with _ -> cur_map)
         in
         build_of_instr_list new_map (elt2 :: tl)
-    | (cur_mem, _) :: [] ->
-      let last_addr = (try Some (to_int64_addr @@ BStd.Memory.min_addr cur_mem)
-                       with _ -> None) in
+    | (cur_mem, cur_insn) :: [] ->
+      let last_addr =
+        (try Some (to_int64_addr @@ BStd.Memory.min_addr cur_mem)
+         with _ -> None) in
       cur_map, last_addr
 
       (* Ignore the last one: its successors are held in the graph *)
@@ -165,27 +168,50 @@ let build_next_instr (disasm: BStd.disasm): AddrSet.t AddrMap.t =
   in
 
   let build_of_block cur_map block =
-    let cur_map, last_addr =
-      build_of_instr_list cur_map (BStd.Block.insns block) in
-    (match last_addr with
-     | Some last_addr ->
-       let following_set = BStd.Graphs.Cfg.Node.outputs block cfg
-                           |> BStd.Seq.fold
-                             ~init:AddrSet.empty
-                             ~f:(fun set edge -> AddrSet.union
-                                    (block_addresses
-                                       (BStd.Graphs.Cfg.Edge.dst edge))
-                                    set)
-       in
-       AddrMap.add last_addr following_set cur_map
-     | None -> cur_map
+    (try
+       (* First, check that this block belongs to a subroutine *)
+       let block_first_address = (
+         try
+           to_int64_addr @@ BStd.Block.addr block
+         with _ -> raise Block_not_in_subroutine) in
+       let sub_first_addr, sub_last_addr = (
+         try AddrMap.find_last
+               (fun start_addr -> start_addr <= block_first_address) sub_ranges
+         with Not_found ->
+           raise Block_not_in_subroutine
+       ) in
+
+       (* Add the sequence of instuctions inside the block itself *)
+       let cur_map, last_addr =
+         build_of_instr_list cur_map (BStd.Block.insns block) in
+
+       (* Then the set of possible destinations for the block terminator *)
+       (match last_addr with
+        | Some last_addr ->
+          let following_set = BStd.Graphs.Cfg.Node.outputs block cfg
+                              |> BStd.Seq.fold
+                                ~init:AddrSet.empty
+                                ~f:(fun set edge -> AddrSet.union
+                                       (block_addresses
+                                          (BStd.Graphs.Cfg.Edge.dst edge))
+                                       set)
+                              |> AddrSet.filter (fun addr ->
+                                  sub_first_addr <= addr
+                                  && addr <= sub_last_addr)
+                                (* ^ We must ensure the landing address belongs
+                                   to the current subroutine for our purpose *)
+          in
+          AddrMap.add last_addr following_set cur_map
+        | None -> cur_map
+       )
+     with Block_not_in_subroutine ->
+       cur_map
     )
   in
 
   BStd.Seq.fold (BStd.Graphs.Cfg.nodes cfg)
     ~init:AddrMap.empty
     ~f:build_of_block
-
 
 let find_rbp_pop_set cfg entry =
   (** Returns a BStd.Tid.Set.t of the terms actually "popping" %rbp, that is,
@@ -701,11 +727,29 @@ let of_prog prog next_instr_graph : subroutine_cfa_map =
     ~init:StrMap.empty
     ~f:fold_step
 
+let build_sub_ranges prog: (memory_address) AddrMap.t =
+  (** Builds a map mapping the first address of each subroutine to its last
+      address. This map can be interpreted as a list of address ranges with
+      easy fast access to a member (cf Map.S.find_first) *)
+
+  let fold_subroutine accu sub =
+    let first_addr = int64_addr_of sub in
+    let last_addr = find_last_addr sub in
+    AddrMap.add first_addr (last_addr) accu
+  in
+
+  let subroutines = BStd.Term.enum BStd.sub_t prog in
+  BStd.Seq.fold subroutines
+    ~init:AddrMap.empty
+    ~f:fold_subroutine
+
 let of_proj no_rbp_undef proj : subroutine_cfa_map =
   (** Extracts the `cfa_changes` of a project *)
   __settings.no_rbp_undef <- no_rbp_undef ;
-  let next_instr_graph = build_next_instr (BStd.Project.disasm proj) in
   let prog = BStd.Project.program proj in
+  let sub_ranges = build_sub_ranges prog in
+  let next_instr_graph =
+    build_next_instr sub_ranges (BStd.Project.disasm proj) in
   of_prog prog next_instr_graph
 
 let clean_lost_track_subs pre_dwarf : subroutine_cfa_map =
