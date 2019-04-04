@@ -38,7 +38,7 @@ for _num in $(seq 1 $NB_TESTS); do
     objcopy --remove-section '.eh_frame' --remove-section '.eh_frame_hdr' \
         "$path.orig.bin" "$path.bin"
     echo -ne "\r>>> $num.eh.bin          "
-    ../synthesize_dwarf.sh "$path.bin" "$path.eh.bin"
+    BAP_ARGS='--dwarfsynth-no-rbp-undef' ../synthesize_dwarf.sh "$path.bin" "$path.eh.bin"
 
     if [ "$check_gen_eh_frame" -gt 0 ] ; then
         ./check_generated_eh_frame.sh "$path"

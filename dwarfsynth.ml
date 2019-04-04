@@ -20,8 +20,18 @@ module Cmdline = struct
         ~default:"tmp.marshal"
     )
 
+  let no_rbp_undef = Cnf.(
+      param (bool) "no-rbp-undef"
+        ~doc:("Do not unset %rbp after it has been set once in a FDE. "
+              ^"This mimics gcc eh_frame for ease of validation.")
+        ~as_flag:true
+        ~default:false
+    )
+
   let () = Cnf.(
       when_ready ((fun {get=(!!)} ->
-          Bap.Std.Project.register_pass' (main !!outfile)))
+          Bap.Std.Project.register_pass' (main
+                                            ~no_rbp_undef:!!no_rbp_undef
+                                            !!outfile )))
     )
 end

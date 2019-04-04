@@ -27,7 +27,8 @@ type subroutine_cfa_data = {
 }
 
 type block_local_state = {
-  rbp_vars: BStd.Var.Set.t
+  rbp_vars: BStd.Var.Set.t;
+  rbp_pop_set: BStd.Tid.Set.t
 }
 
 module StrMap = Map.Make(String)
@@ -38,10 +39,25 @@ module TIdMap = Map.Make(BStd.Tid)
 exception InvalidSub
 exception UnexpectedRbpSet
 
+type synthesis_settings = {
+    mutable no_rbp_undef: bool
+  }
+
+let __settings = {
+  no_rbp_undef = false
+}
+
 let pp_cfa_pos ppx = function
   | RspOffset off -> Format.fprintf ppx "RSP + (%s)" (Int64.to_string off)
   | RbpOffset off -> Format.fprintf ppx "RBP + (%s)" (Int64.to_string off)
   | CfaLostTrack -> Format.fprintf ppx "??@."
+
+let pp_rbp_pos ppx = function
+  | RbpUndef -> Format.fprintf ppx "u"
+  | RbpCfaOffset off -> Format.fprintf ppx "c%+Ld" off
+
+let pp_reg_pos ppx (cfa_pos, rbp_pos) =
+  Format.fprintf ppx "(%a; %a)" pp_cfa_pos cfa_pos pp_rbp_pos rbp_pos
 
 let pp_int64_hex ppx number =
   let mask_short = Int64.(pred (shift_left one 16)) in
@@ -177,6 +193,102 @@ let build_next_instr graph =
     ~init:AddrMap.empty
     ~f:build_of_block
 
+let find_rbp_pop_set cfg entry =
+  (** Returns a BStd.Tid.Set.t of the terms actually "popping" %rbp, that is,
+      the terms that should trigger a change to RbpUndef of the %rbp register.
+      The current heuristic is to consider the expressions
+       i) of the form `rbp = F(mem, rsp)` (alledgedly, rbp = something from the
+        stack);
+      ii) that are the last of this kind in the subroutine's CFG (ie. such that
+        there is not another instruction matching (i) that is reachable through
+        the CFG from the current instruction).
+  *)
+
+  let def_is_rbp_pop def =
+    let is_pop_expr expr =
+      let free_vars = BStd.Exp.free_vars expr in
+      let free_x86_regs = Regs.X86_64.map_varset free_vars in
+      (match Regs.DwRegOptSet.cardinal free_x86_regs with
+       | 2 ->
+         let reg = free_x86_regs
+                   |> Regs.DwRegOptSet.filter
+                     (fun x -> match x with None -> false | Some _ -> true)
+                   |> Regs.DwRegOptSet.choose in
+         let has_mem_var = BStd.Var.Set.exists
+             ~f:(fun x -> BStd.Var.name x = "mem")
+             free_vars in
+         (match reg, has_mem_var with
+          | Some dw_var, true when dw_var = Regs.X86_64.rsp -> true
+          | _ -> false)
+       | _ -> false
+      )
+    in
+
+    (match Regs.X86_64.of_var (BStd.Def.lhs def),
+           is_pop_expr @@ BStd.Def.rhs def with
+    | Some reg, true when reg = Regs.X86_64.rbp -> true
+    | _ -> false
+    )
+  in
+
+
+  let block_find_rbp_pop block =
+    let fold_elt = function
+      | `Def(def) when (def_is_rbp_pop def) -> Some (BStd.Term.tid def)
+      | _ -> None
+    in
+
+    let elts_seq = BStd.Blk.elts block in
+    let last_pop = BStd.Seq.fold elts_seq
+        ~init:None
+        ~f:(fun accu elt ->
+            (match fold_elt elt with
+             | None -> accu
+             | Some tid -> Some tid))
+    in
+    last_pop
+  in
+
+  let rec block_dfs node visited =
+    (* DFS on the CFG to find rbp pops, and rule out those that are not final
+     *)
+    let block = CFG.Node.label node in
+    (match BStd.Blk.Set.mem visited block with
+    | true ->
+      (* Loop: we already visited this node *)
+      BStd.Tid.Set.empty, true, visited
+    | false ->
+      let visited = BStd.Blk.Set.add visited block in
+      let pop_set, has_pop, visited =
+        BStd.Seq.fold (CFG.Node.succs node cfg)
+          ~f:(fun (pre_pop_set, pre_has_pop, visited) child ->
+              let cur_pop_set, cur_has_pop, visited =
+                block_dfs child visited in
+              (BStd.Tid.Set.union pre_pop_set cur_pop_set),
+              (pre_has_pop || cur_has_pop),
+              visited
+            )
+          ~init:(BStd.Tid.Set.empty, false, visited)
+      in
+      let pop_set, has_pop = (match has_pop with
+          | false -> (* No rbp pop below, we seek rbp pops in this block *)
+            (match block_find_rbp_pop block with
+                | None -> pop_set, false
+                | Some tid -> BStd.Tid.Set.add pop_set tid, true
+            )
+          | true -> pop_set, has_pop) in
+      pop_set, has_pop, visited
+    )
+  in
+
+  if __settings.no_rbp_undef then
+    BStd.Tid.Set.empty
+  else (
+    let pop_set, _, _ =
+      block_dfs entry (BStd.Blk.Set.empty) in
+    pop_set
+  )
+
 let interpret_var_expr c_var offset expr = BStd.Bil.(
     let closed_form = BStd.Exp.substitute
       (var c_var)
@@ -288,25 +400,6 @@ let process_def (local_state: block_local_state) def (cur_reg: reg_pos)
      (has_rbp_var || has_intermed_rbp_var))
   in
 
-  let is_pop_expr expr =
-    let free_vars = BStd.Exp.free_vars expr in
-    let free_x86_regs = Regs.X86_64.map_varset free_vars in
-    (match Regs.DwRegOptSet.cardinal free_x86_regs with
-     | 2 ->
-       let reg = free_x86_regs
-                 |> Regs.DwRegOptSet.filter
-                   (fun x -> match x with None -> false | Some _ -> true)
-                 |> Regs.DwRegOptSet.choose in
-       let has_mem_var = BStd.Var.Set.exists
-         ~f:(fun x -> BStd.Var.name x = "mem")
-         free_vars in
-       (match reg, has_mem_var with
-        | Some dw_var, true when dw_var = Regs.X86_64.rsp -> true
-        | _ -> false)
-     | _ -> false
-    )
-  in
-
   let is_rbp_expr expr =
     let free_vars = BStd.Exp.free_vars expr in
     let free_x86_regs = Regs.X86_64.map_varset free_vars in
@@ -369,13 +462,14 @@ let process_def (local_state: block_local_state) def (cur_reg: reg_pos)
 
        new_rbp, cur_state
      | RbpCfaOffset offs ->
-       (* We go back to RbpUndef when encountering something like a `pop rbp`,
-          that is, RBP <- f(RSP, mem) *)
-       (match Regs.X86_64.of_var (BStd.Def.lhs def),
-              is_pop_expr @@ BStd.Def.rhs def with
-       | Some reg, true when reg = Regs.X86_64.rbp ->
+       (* We go back to RbpUndef if the current def is in the rbp_pop_set --
+          see `find_rbp_pop_set` *)
+
+       (match BStd.Tid.Set.mem (local_state.rbp_pop_set) @@ BStd.Term.tid def
+            with
+       | true ->
          Some RbpUndef, local_state
-       | _ -> None, local_state
+       | false -> None, local_state
        )
     )
   in
@@ -404,7 +498,8 @@ let process_jmp jmp (cur_reg: reg_pos)
   | _ -> None
 
 let process_blk
-    next_instr_graph (block_init: reg_pos) blk : (reg_changes_fde * reg_pos) =
+    next_instr_graph rbp_pop_set (block_init: reg_pos) blk
+  : (reg_changes_fde * reg_pos) =
   (** Extracts the registers (CFA+RBP) changes of a block. *)
 
   let apply_offset cur_addr_opt ((accu:reg_changes_fde), cur_reg, local_state)
@@ -442,7 +537,8 @@ let process_blk
     ) in
 
   let empty_local_state = {
-    rbp_vars = BStd.Var.Set.empty
+    rbp_vars = BStd.Var.Set.empty;
+    rbp_pop_set = rbp_pop_set
   } in
   let elts_seq = BStd.Blk.elts blk in
   let out_reg, end_reg, _ = BStd.Seq.fold elts_seq
@@ -536,6 +632,9 @@ let process_sub sub : subroutine_cfa_data =
 
   let initial_cfa_rsp_offset = Int64.of_int 8 in
 
+  let entry_blk = get_entry_blk cfg in
+  let rbp_pop_set = find_rbp_pop_set cfg entry_blk in
+
   let rec dfs_process
       (sub_changes: (reg_changes_fde * reg_pos) TIdMap.t)
       node
@@ -549,7 +648,7 @@ let process_sub sub : subroutine_cfa_data =
     | None ->
       (* Not yet visited: compute the changes *)
       let cur_blk_changes, end_reg =
-        process_blk next_instr_graph entry_offset cur_blk in
+        process_blk next_instr_graph rbp_pop_set entry_offset cur_blk in
       let n_sub_changes =
         TIdMap.add tid (cur_blk_changes, entry_offset) sub_changes in
       BStd.Seq.fold (CFG.Node.succs node cfg)
@@ -558,12 +657,15 @@ let process_sub sub : subroutine_cfa_data =
     | Some (_, former_entry_offset) ->
       (* Already visited: check that entry values are matching *)
       if entry_offset <> former_entry_offset then
-        raise (Inconsistent tid)
+        ( Format.eprintf "Found inconsistency (0x%Lx): %a -- %a@."
+            (int64_addr_of cur_blk)
+            pp_reg_pos entry_offset pp_reg_pos former_entry_offset
+        ;
+        raise (Inconsistent tid) )
       else
         sub_changes
   in
 
-  let entry_blk = get_entry_blk cfg in
   let initial_offset = (RspOffset initial_cfa_rsp_offset, RbpUndef) in
   let changes_map = dfs_process TIdMap.empty entry_blk initial_offset in
 
@@ -606,8 +708,9 @@ let of_prog prog : subroutine_cfa_map =
     ~init:StrMap.empty
     ~f:fold_step
 
-let of_proj proj : subroutine_cfa_map =
+let of_proj no_rbp_undef proj : subroutine_cfa_map =
   (** Extracts the `cfa_changes` of a project *)
+  __settings.no_rbp_undef <- no_rbp_undef ;
   let prog = BStd.Project.program proj in
   of_prog prog
 
