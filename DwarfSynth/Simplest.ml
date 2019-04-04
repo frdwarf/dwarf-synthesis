@@ -344,13 +344,14 @@ let is_single_free_reg expr =
   )
 
 let process_def (local_state: block_local_state) def (cur_reg: reg_pos)
+    allow_rbp
   : (reg_pos option * block_local_state) =
   let lose_track = Some CfaLostTrack in
 
   let cur_cfa, cur_rbp = cur_reg in
   let out_cfa =
-    (match cur_cfa, Regs.X86_64.of_var (BStd.Def.lhs def) with
-     | RspOffset(cur_offset), Some reg when reg = Regs.X86_64.rsp ->
+    (match cur_cfa, Regs.X86_64.of_var (BStd.Def.lhs def), allow_rbp with
+     | RspOffset(cur_offset), Some reg, _ when reg = Regs.X86_64.rsp ->
        let exp = BStd.Def.rhs def in
        (match is_single_free_reg exp with
         | Some (bil_var, dw_var) when dw_var = Regs.X86_64.rsp ->
@@ -362,7 +363,7 @@ let process_def (local_state: block_local_state) def (cur_reg: reg_pos)
           )
         | _ -> lose_track
        )
-     | RspOffset(cur_offset), Some reg when reg = Regs.X86_64.rbp ->
+     | RspOffset(cur_offset), Some reg, true when reg = Regs.X86_64.rbp ->
        (* We have CFA=rsp+k and a line %rbp <- [expr].
           Might be a %rbp <- %rsp *)
        let exp = BStd.Def.rhs def in
@@ -383,7 +384,7 @@ let process_def (local_state: block_local_state) def (cur_reg: reg_pos)
           )
         | _ -> None
        )
-     | RbpOffset(cur_offset), Some reg when reg = Regs.X86_64.rbp ->
+     | RbpOffset(cur_offset), Some reg, true when reg = Regs.X86_64.rbp ->
        (* Assume we are overwriting %rbp with something — we must revert to
           some rsp-based indexing *)
        (* FIXME don't assume the rsp offset will always be 8, find a smart way
@@ -392,6 +393,7 @@ let process_def (local_state: block_local_state) def (cur_reg: reg_pos)
           value is read from the stack.
        *)
        Some (RspOffset(Int64.of_int 16))
+     | RbpOffset _, _, false -> assert false
      | _ -> None
     ) in
 
@@ -518,7 +520,7 @@ let process_jmp jmp (cur_reg: reg_pos)
   | _ -> None
 
 let process_blk
-    next_instr_graph rbp_pop_set (block_init: reg_pos) blk
+    next_instr_graph rbp_pop_set allow_rbp (block_init: reg_pos) blk
   : (reg_changes_fde * reg_pos) =
   (** Extracts the registers (CFA+RBP) changes of a block. *)
 
@@ -539,7 +541,8 @@ let process_blk
 
   let fold_elt (accu, cur_reg, cur_local_state) elt = match elt with
     | `Def(def) ->
-      let new_offset, new_state = process_def cur_local_state def cur_reg in
+      let new_offset, new_state =
+        process_def cur_local_state def cur_reg allow_rbp in
       apply_offset
         (opt_addr_of def) (accu, cur_reg, new_state) new_offset
     | `Jmp(jmp) ->
@@ -655,6 +658,7 @@ let process_sub sub next_instr_graph : subroutine_cfa_data =
   let rbp_pop_set = find_rbp_pop_set cfg entry_blk in
 
   let rec dfs_process
+      allow_rbp
       (sub_changes: (reg_changes_fde * reg_pos) TIdMap.t)
       node
       (entry_offset: reg_pos) =
@@ -667,26 +671,56 @@ let process_sub sub next_instr_graph : subroutine_cfa_data =
     | None ->
       (* Not yet visited: compute the changes *)
       let cur_blk_changes, end_reg =
-        process_blk next_instr_graph rbp_pop_set entry_offset cur_blk in
+        process_blk next_instr_graph rbp_pop_set
+          allow_rbp entry_offset cur_blk in
       let n_sub_changes =
         TIdMap.add tid (cur_blk_changes, entry_offset) sub_changes in
       BStd.Seq.fold (CFG.Node.succs node cfg)
-        ~f:(fun accu child -> dfs_process accu child end_reg)
+        ~f:(fun accu child -> dfs_process allow_rbp accu child end_reg)
         ~init:n_sub_changes
     | Some (_, former_entry_offset) ->
       (* Already visited: check that entry values are matching *)
-      if entry_offset <> former_entry_offset then
-        ( Format.eprintf "Found inconsistency (0x%Lx): %a -- %a@."
+      if entry_offset <> former_entry_offset then (
+        if allow_rbp then
+          Format.eprintf "Found inconsistency (0x%Lx): %a -- %a@."
             (int64_addr_of cur_blk)
-            pp_reg_pos entry_offset pp_reg_pos former_entry_offset
-        ;
-        raise (Inconsistent tid) )
+            pp_reg_pos entry_offset pp_reg_pos former_entry_offset ;
+        raise (Inconsistent tid)
+      )
       else
         sub_changes
   in
 
+  let with_rbp_if_needed initial_offset =
+    (* Tries first without allowing CFA=rbp+k, then allowing it if the first
+       result was either inconsistent or lost track *)
+    let not_losing_track synth_result =
+      let lost_track = TIdMap.exists
+          (fun _ (_, (cfa_pos, _)) -> match cfa_pos with
+             | CfaLostTrack -> true
+             | _ -> false) synth_result
+      in
+      (match lost_track with
+       | true -> None
+       | false -> Some synth_result)
+    in
+    let without_rbp =
+      (try
+         dfs_process false TIdMap.empty entry_blk initial_offset
+         |> not_losing_track
+       with Inconsistent _ -> None
+      )
+    in
+    (match without_rbp with
+     | Some correct_res -> correct_res
+     | None ->
+       dfs_process true TIdMap.empty entry_blk initial_offset)
+  in
+
+
   let initial_offset = (RspOffset initial_cfa_rsp_offset, RbpUndef) in
-  let changes_map = dfs_process TIdMap.empty entry_blk initial_offset in
+  (* Try first without rbp, then with rbp upon failure *)
+  let changes_map = with_rbp_if_needed initial_offset in
 
   let merged_changes = TIdMap.fold
       (fun _ (cfa_changes, _) accu -> AddrMap.union (fun _ v1 v2 ->
