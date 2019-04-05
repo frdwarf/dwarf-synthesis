@@ -32,15 +32,105 @@ def parse_fde_head(line):
     return pc_beg, pc_end
 
 
-def parse_fde_row(line, ra_col, rbp_col):
+def detect_clang_flat_to_pyramid(rows):
+    """ Artificially repair clang flat callee-saved saving to a gcc pyramid-like shape.
+
+    Eg., clang will generate
+       LOC           CFA      rbx   rbp   ra
+    0000000000007180 rsp+8    u     u     c-8
+    0000000000007181 rsp+16   u     u     c-8
+    0000000000007182 rsp+24   u     u     c-8
+    0000000000007189 rsp+7632 c-24  c-16  c-8
+
+
+    while we would wish to have
+       LOC           CFA      rbx   rbp   ra
+    0000000000007180 rsp+8    u     u     c-8
+    0000000000007181 rsp+16   u     c-16  c-8
+    0000000000007182 rsp+24   c-24  c-16  c-8
+    0000000000007189 rsp+7632 c-24  c-16  c-8
+
+    The repair strategy is as follows:
+    - ignore the implicit first row
+    - find the first k lines such that only CFA changes from line to line, with a delta
+      of +8, with address delta of 2. (push is 2 bytes long)
+    - for every callee-saved R that concerns us and that is defined at line k+1 with
+      offset c-x, while rsp+x is the CFA of line k' <= k, redefine R as c-k in lines
+      [k'; k[
+    """
+
+    def try_starting_at(start_row):
+        if len(rows) < start_row + 1:  # Ensure we have at least the start row
+            return rows, False
+
+        flatness_row_id = start_row
+        if rows[1]["CFA"][:4] != "rsp+":
+            return rows, False
+        first_cfa = int(rows[start_row]["CFA"][4:])
+        prev_cfa = first_cfa
+        prev_loc = rows[start_row]["LOC"]
+        for row in rows[start_row + 1 :]:
+            for reg in row:
+                if reg not in ["LOC", "CFA", "ra"] and row[reg] != "u":
+                    break
+            cfa = row["CFA"]
+            if cfa[:4] != "rsp+":
+                break
+            cfa_offset = int(cfa[4:])
+            if cfa_offset != prev_cfa + 8:
+                break
+            prev_cfa += 8
+            loc = row["LOC"]
+            if loc > prev_loc + 2:
+                break
+            prev_loc = loc
+            flatness_row_id += 1
+        flatness_row_id += 1
+        if flatness_row_id - start_row <= 1 or flatness_row_id >= len(rows):
+            return rows, False  # nothing to change
+        flatness_row = rows[flatness_row_id]
+
+        reg_changes = {}
+        for reg in flatness_row:
+            if reg in ["LOC", "CFA", "ra"]:
+                continue
+            rule = flatness_row[reg]
+            if rule[:2] != "c-":
+                return rows, False  # Not a flat_to_pyramid after all
+            rule_offset = int(rule[2:])
+            rule_offset_rectified = rule_offset - first_cfa
+            if rule_offset_rectified % 8 != 0:
+                return rows, False
+            row_change_id = rule_offset_rectified // 8 + start_row
+            reg_changes[reg] = (row_change_id, rule)
+
+        for reg in reg_changes:
+            change_from, rule = reg_changes[reg]
+            for row in rows[change_from:flatness_row_id]:
+                row[reg] = rule
+
+        return rows, True
+
+    for start_row in [1, 2]:
+        mod_rows, modified = try_starting_at(start_row)
+        if modified:
+            return mod_rows
+    return rows
+
+
+def parse_fde_row(line, reg_cols):
     vals = list(map(lambda x: x.strip(), line.split()))
-    assert len(vals) > ra_col  # ra is the rightmost useful column
-    out = {
-        "LOC": int(vals[0], 16),
-        "CFA": vals[1],
-        "rbp": vals[rbp_col] if rbp_col else "u",
-        "ra": vals[ra_col],
-    }
+    assert len(vals) > reg_cols["ra"]  # ra is the rightmost useful column
+
+    out = {"LOC": int(vals[0], 16), "CFA": vals[1]}
+
+    for reg in reg_cols:
+        col_id = reg_cols[reg]
+        out[reg] = vals[col_id]
+
+    if "rbp" not in out:
+        out["rbp"] = "u"
+
     return out
 
 
@@ -52,7 +142,14 @@ def clean_rows(rows):
     out_rows = [rows[0]]
     for row in rows[1:]:
         if not row == out_rows[-1]:
-            out_rows.append(row)
+            filtered_row = row
+            filter_out = []
+            for reg in filtered_row:
+                if reg not in ["LOC", "CFA", "rbp", "ra"]:
+                    filter_out.append(reg)
+            for reg in filter_out:
+                filtered_row.pop(reg)
+            out_rows.append(filtered_row)
     return out_rows
 
 
@@ -67,14 +164,24 @@ def parse_fde(lines):
 
     if len(lines) >= 2:  # Has content
         head_row = list(map(lambda x: x.strip(), lines[1].split()))
-        ra_col = head_row.index("ra")
-        try:
-            rbp_col = head_row.index("rbp")
-        except ValueError:
-            rbp_col = None
+        reg_cols = {}
+        for pos, reg in enumerate(head_row):
+            if reg not in ["LOC", "CFA"]:
+                reg_cols[reg] = pos
 
         for line in lines[2:]:
-            rows.append(parse_fde_row(line, ra_col, rbp_col))
+            rows.append(parse_fde_row(line, reg_cols))
+
+    # if pc_beg == 0x1160:
+    #     print("===== FDE: {}..{} ====".format(hex(pc_beg), hex(pc_end)))
+    #     print("BEFORE:")
+    #     for row in rows:
+    #         print(row)
+    rows = detect_clang_flat_to_pyramid(rows)
+    # if pc_beg == 0x1160:
+    #     print("AFTER:")
+    #     for row in rows:
+    #         print(row)
 
     return {"beg": pc_beg, "end": pc_end, "rows": clean_rows(rows)}
 
@@ -246,9 +353,25 @@ def main():
     if mismatches > 0:
         reports.append("{} mismatches".format(mismatches))
     if unmatched_orig:
-        reports.append("{} unmatched (orig)".format(len(unmatched_orig)))
+        worth_reporting = False
+        for unmatched in unmatched_orig:
+            if len(unmatched["rows"]) > 1:
+                worth_reporting = True
+                break
+        if worth_reporting:
+            unmatched_addrs = [fde_pos(fde) for fde in unmatched_orig]
+            reports.append(
+                "{} unmatched (orig): {}".format(
+                    len(unmatched_orig), ", ".join(unmatched_addrs)
+                )
+            )
     if unmatched_synth:
-        reports.append("{} unmatched (synth)".format(len(unmatched_synth)))
+        unmatched_addrs = [fde_pos(fde) for fde in unmatched_synth]
+        reports.append(
+            "{} unmatched (synth): {}".format(
+                len(unmatched_synth), ", ".join(unmatched_addrs)
+            )
+        )
 
     if reports:
         print("{}: {}".format(test_name, "; ".join(reports)))
