@@ -98,6 +98,15 @@ let opt_addr_of_blk_elt = function
   | `Jmp jmp -> opt_addr_of jmp
   | `Phi phi -> opt_addr_of phi
 
+let is_ghost_sub sub =
+  (** Check whether the subroutine has content *)
+  let is_ghost_block blk =
+    BStd.Blk.elts blk
+    |> BStd.Seq.is_empty
+  in
+  let blk_seq = BStd.Term.enum BStd.blk_t sub in
+  BStd.Seq.for_all blk_seq ~f:is_ghost_block
+
 let entrypoint_address blk =
   (** Find the first instruction address in the current block.
       Return None if no instruction has address.  *)
@@ -746,8 +755,12 @@ let of_prog prog next_instr_graph : subroutine_cfa_map =
   (** Extracts the `cfa_changes` of a program *)
   let fold_step accu sub =
     (try
-       let subroutine_data = process_sub sub next_instr_graph in
-       StrMap.add (BStd.Sub.name sub) subroutine_data accu
+       (match is_ghost_sub sub with
+        | true -> accu
+        | false ->
+          let subroutine_data = process_sub sub next_instr_graph in
+          StrMap.add (BStd.Sub.name sub) subroutine_data accu
+       )
      with
      | InvalidSub -> accu
      | Inconsistent tid ->
@@ -767,9 +780,13 @@ let build_sub_ranges prog: (memory_address) AddrMap.t =
       easy fast access to a member (cf Map.S.find_first) *)
 
   let fold_subroutine accu sub =
-    let first_addr = int64_addr_of sub in
-    let last_addr = find_last_addr sub in
-    AddrMap.add first_addr (last_addr) accu
+    (match is_ghost_sub sub with
+     | true -> accu
+     | false ->
+       let first_addr = int64_addr_of sub in
+       let last_addr = find_last_addr sub in
+       AddrMap.add first_addr (last_addr) accu
+    )
   in
 
   let subroutines = BStd.Term.enum BStd.sub_t prog in
