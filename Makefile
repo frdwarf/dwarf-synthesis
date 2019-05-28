@@ -1,6 +1,7 @@
 OCAMLBUILD=bapbuild -no-hygiene
 BAPBUNDLE=bapbundle
 ROOT_MODULE=dwarfsynth
+TARBALL=dwarfsynth.tar.gz
 
 LIBDWARFW_SO=libdwarfw/build/libdwarfw.so
 LIBDWARFW_SO_MESON=libdwarfw/build/build.ninja
@@ -22,10 +23,31 @@ $(LIBDWARFW_SO):
 $(ROOT_MODULE).plugin:
 	$(OCAMLBUILD) $(ROOT_MODULE).plugin
 
+###############################################################################
 .PHONY: install
 install: $(ROOT_MODULE).plugin
 	$(BAPBUNDLE) install $<
 
+###############################################################################
 .PHONY: clean
 clean:
 	rm -rf _build
+
+###############################################################################
+tarball: $(TARBALL)
+
+.PHONY: $(TARBALL)
+$(TARBALL):
+	tar czf $(TARBALL) \
+		--exclude=.git \
+		--exclude=.gitignore \
+		--exclude=libdwarfw/build \
+		--exclude-backups \
+		--exclude=*.bck \
+		--exclude=*.bin \
+		--exclude=*.o \
+		--exclude=*.cmi \
+		--exclude=*.cmx \
+		--transform='s#^#dwarfsynth/#g' \
+		DwarfSynth dwarfsynth.ml DwarfSynth.mlpack libdwarfw LICENSE Makefile \
+		README.md synthesize_dwarf.sh _tags
