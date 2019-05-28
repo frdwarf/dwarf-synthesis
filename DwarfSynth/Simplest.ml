@@ -581,7 +581,7 @@ let process_blk
 exception Inconsistent of BStd.tid
 
 let get_entry_blk graph =
-  let entry = BStd.Seq.min_elt (CFG.nodes graph) ~cmp:(fun x y ->
+  let entry = BStd.Seq.min_elt (CFG.nodes graph) ~compare:(fun x y ->
       let ax = opt_addr_of @@ CFG.Node.label x
       and ay = opt_addr_of @@ CFG.Node.label y in
       match ax, ay with
@@ -732,11 +732,14 @@ let process_sub sub next_instr_graph : subroutine_cfa_data =
   let changes_map = with_rbp_if_needed initial_offset in
 
   let merged_changes = TIdMap.fold
-      (fun _ (cfa_changes, _) accu -> AddrMap.union (fun _ v1 v2 ->
+      (fun _ (cfa_changes, _) accu -> AddrMap.union (fun addr v1 v2 ->
            if v1 = v2 then
              Some v1
-           else
-             assert false)
+           else (
+             Format.eprintf "Inconsistency: 0x%Lx: cannot merge %a - %a@."
+               addr pp_reg_pos v1 pp_reg_pos v2 ;
+             Some (CfaLostTrack, RbpUndef))
+         )
            cfa_changes accu)
     changes_map
     AddrMap.empty in
