@@ -50,6 +50,7 @@ function dwarf_write_synth {
 
 function dwarf_plug {
     objcopy \
+        --remove-section '.eh_frame' --remove-section '.eh_frame_hdr' \
         --add-section .eh_frame="$TMP_DIR/eh_frame" \
         "$INPUT_FILE" "$OUTPUT_FILE"
     return $?
@@ -71,6 +72,10 @@ OUTPUT_FILE="$2"
 
 if ! [ -f "$INPUT_FILE" ] ; then
     >&2 echo -e "$INPUT_FILE: no such file.\n\n$HELP_TEXT"
+fi
+
+if [ -z "$OUTPUT_FILE" ] ; then
+    OUTPUT_FILE="$INPUT_FILE"
 fi
 
 TMP_DIR="$(mktemp -d)"
