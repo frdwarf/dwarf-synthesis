@@ -172,17 +172,7 @@ def parse_fde(lines):
         for line in lines[2:]:
             rows.append(parse_fde_row(line, reg_cols))
 
-    # if pc_beg == 0x1160:
-    #     print("===== FDE: {}..{} ====".format(hex(pc_beg), hex(pc_end)))
-    #     print("BEFORE:")
-    #     for row in rows:
-    #         print(row)
     rows = detect_clang_flat_to_pyramid(rows)
-    # if pc_beg == 0x1160:
-    #     print("AFTER:")
-    #     for row in rows:
-    #         print(row)
-
     return {"beg": pc_beg, "end": pc_end, "rows": clean_rows(rows)}
 
 
@@ -282,6 +272,7 @@ def match_fde(orig, synth):
     rowchanges.sort(key=loc_of)
 
     mismatch_count = 0
+    match_count = 0
     for rowid, rowch in enumerate(rowchanges):
         typ, row = rowch[0], rowch[1]
         cur_val[typ] = vals_of(row)
@@ -297,8 +288,10 @@ def match_fde(orig, synth):
                     )
                 )
             mismatch_count += 1
+        else:
+            match_count += 1
 
-    return mismatch_count
+    return mismatch_count, match_count
 
 
 def parse_sym_table(handle):
@@ -347,11 +340,14 @@ def main():
     # dump_light_fdes(unmatched_synth)
 
     mismatches = 0
+    good_match = 0
     for (orig, synth) in matched:
-        mismatches += match_fde(orig, synth)
+        cur_mismatch, cur_match = match_fde(orig, synth)
+        mismatches += cur_mismatch
+        good_match += cur_match
     reports = []
     if mismatches > 0:
-        reports.append("{} mismatches".format(mismatches))
+        reports.append("{} mismatches - {} well matched".format(mismatches, good_match))
     if unmatched_orig:
         worth_reporting = False
         for unmatched in unmatched_orig:
@@ -374,6 +370,8 @@ def main():
         )
 
     if reports:
+        # If we had some errors to report, let's report positive data too
+        reports.append("{} matched".format(len(matched)))
         print("{}: {}".format(test_name, "; ".join(reports)))
 
 
