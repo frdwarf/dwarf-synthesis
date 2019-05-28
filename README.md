@@ -8,8 +8,22 @@ examine its assembly code and, based solely on that, generate the corresponding
 
 ## Dependencies
 
-This tool relies on [BAP](https://github.com/BinaryAnalysisPlatform/bap), which
-is available through OPAM.
+This tool relies on
+
+* [BAP](https://github.com/BinaryAnalysisPlatform/bap) version 1.6 as of today,
+  which is available through OPAM;
+* `objcopy`, often packaged as `binutils`
+* `libelf`
+* `libdwarf`
+* `libdwarfw`, packaged as submodule
+
+### Installing dependencies
+
+You should be able to easily install `objcopy` (`binutils`), `libelf`,
+`libdwarf` and `opam` via your package manager. Once
+[`opam` is set up](https://opam.ocaml.org/doc/Install.html), you should be able
+to simply `opam install bap`. We recommand that you use a fresh `opam switch`
+in case you already have installed packages with `opam`.
 
 ## Compiling
 
