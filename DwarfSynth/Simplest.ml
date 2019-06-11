@@ -581,7 +581,7 @@ let process_blk
 exception Inconsistent of BStd.tid
 
 let get_entry_blk graph =
-  let entry = BStd.Seq.min_elt (CFG.nodes graph) ~compare:(fun x y ->
+  let entry = BStd.Seq.min_elt (CFG.nodes graph) ~cmp:(fun x y ->
       let ax = opt_addr_of @@ CFG.Node.label x
       and ay = opt_addr_of @@ CFG.Node.label y in
       match ax, ay with
