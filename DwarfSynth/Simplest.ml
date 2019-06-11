@@ -40,11 +40,13 @@ exception InvalidSub
 exception UnexpectedRbpSet
 
 type synthesis_settings = {
-    mutable no_rbp_undef: bool
-  }
+  mutable no_rbp_undef: bool;
+  mutable timers: bool
+}
 
 let __settings = {
-  no_rbp_undef = false
+  no_rbp_undef = false;
+  timers = false
 }
 
 let pp_cfa_pos ppx = function
@@ -82,6 +84,12 @@ let pp_cfa_changes ppx =
 let pp_option_of sub_pp ppx = function
   | None -> Format.fprintf ppx "None"
   | Some x -> Format.fprintf ppx "Some %a" sub_pp x
+
+let timer_probe probe_name =
+  if __settings.timers then (
+    let time = Unix.gettimeofday () in
+    Format.eprintf "~~TIME~~ %s [%f]@." probe_name time
+  )
 
 let opt_addr_of term =
   (** Get the address of a term as an option, if it has one*)
@@ -864,14 +872,18 @@ let build_sub_ranges prog: (memory_address) AddrMap.t =
     ~init:AddrMap.empty
     ~f:fold_subroutine
 
-let of_proj no_rbp_undef proj : subroutine_cfa_map =
+let of_proj no_rbp_undef timers proj : subroutine_cfa_map =
   (** Extracts the `cfa_changes` of a project *)
   __settings.no_rbp_undef <- no_rbp_undef ;
+  __settings.timers <- timers ;
+  timer_probe "dwarfsynth generation" ;
   let prog = BStd.Project.program proj in
   let sub_ranges = build_sub_ranges prog in
   let next_instr_graph =
     build_next_instr sub_ranges (BStd.Project.disasm proj) in
-  of_prog prog next_instr_graph
+  let result = of_prog prog next_instr_graph in
+  timer_probe "dwarfsynth cleaning" ;
+  result
 
 let clean_lost_track_subs pre_dwarf : subroutine_cfa_map =
   (** Removes the subroutines on which we lost track from [pre_dwarf] *)

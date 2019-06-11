@@ -1,0 +1,10 @@
+~~TIME~~ bap startup [1560281385.596669206]
+x86 MOV with offset instructions will not lifted due to unknown llvm version 7.1
+
+~~TIME~~ dwarfsynth generation [1560281387.251200]
+Found inconsistency (0x40d198 <000b5136>): (RSP + (16); u) -- (RSP + (8); u)
+Inconsistent TId 000b5136 in subroutine x2nrealloc, skipping.
+~~TIME~~ dwarfsynth cleaning [1560281390.972639]
+~~TIME~~ write DWARF table [1560281391.047662639]
+~~TIME~~ insert DWARF table in binary [1560281391.059052779]
+~~TIME~~ finish [1560281391.065676545]

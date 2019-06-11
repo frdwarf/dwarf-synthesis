@@ -28,10 +28,19 @@ module Cmdline = struct
         ~default:false
     )
 
+  let timers = Cnf.(
+      param (bool) "timers"
+        ~doc:("Enable timers: print time probes at various points of the "
+              ^"code.")
+        ~as_flag:true
+        ~default: false
+    )
+
   let () = Cnf.(
       when_ready ((fun {get=(!!)} ->
           Bap.Std.Project.register_pass' (main
                                             ~no_rbp_undef:!!no_rbp_undef
+                                            ~timers:!!timers
                                             !!outfile )))
     )
 end

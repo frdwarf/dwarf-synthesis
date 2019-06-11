@@ -15,8 +15,21 @@ If <binary_output_file> is provided, a binary file equivalent to
 <binary_input_file> that contains an .eh_frame ELF section will be written as
 <binary_output_file>.
 
-If not, the input file will be overwriten with such a file."
+If not, the input file will be overwriten with such a file.
+
+If the environment variable TIMERS is set to anything non-empty, the process
+will print timestamps at various locations to find out the time spent in
+the various steps.
+"
 ###############################################################################
+
+function timer_probe {
+    if [ -z "$TIMERS" ] ; then
+        return
+    fi
+    timer_name="$1"
+    >&2 echo "~~TIME~~ $timer_name [$(date +%s.%N)]"
+}
 
 function find_ml_dwarf_write {
     out=$(which "ml_dwarf_write.bin" 2>/dev/null)
@@ -35,7 +48,14 @@ function find_ml_dwarf_write {
 }
 
 function bap_synth {
+    timer_arg=""
+    if [ -n "$TIMERS" ]; then
+        timer_arg='--dwarfsynth-timers'
+    fi
+    # `--no-optimization`: it's actually faster without
     bap "$INPUT_FILE" \
+        $timer_arg \
+        --no-optimization \
         --no-byteweight -p dwarfsynth \
         --dwarfsynth-output "$TMP_DIR/marshal" $BAP_ARGS \
         > /dev/null
@@ -80,8 +100,12 @@ fi
 
 TMP_DIR="$(mktemp -d)"
 
-bap_synth \
+timer_probe "bap startup" \
+    && bap_synth \
+    && timer_probe "write DWARF table" \
     && dwarf_write_synth \
-    && dwarf_plug
+    && timer_probe "insert DWARF table in binary" \
+    && dwarf_plug \
+    && timer_probe "finish"
 
 rm -rf "$TMP_DIR"
