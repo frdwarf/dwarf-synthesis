@@ -176,6 +176,59 @@ let build_next_instr sub_ranges (disasm: BStd.disasm): AddrSet.t AddrMap.t =
     )
   in
 
+  let block_following_set block sub_first_addr sub_last_addr last_addr =
+    (** Set of addresses that are successors of this block
+
+        This set is the set of the addresses of blocks pointed by an output
+        edge of this block. We filter this set so that it only contains
+        addresses inside the subroutine, and take care of keeping only the
+        return edge of calls.
+    *)
+
+    let blk_outputs =
+       BStd.Graphs.Cfg.Node.outputs block cfg
+       |> BStd.Seq.fold
+         ~init:AddrSet.empty
+         ~f:(fun set edge -> AddrSet.union
+                (block_addresses
+                   (BStd.Graphs.Cfg.Edge.dst edge))
+                set)
+       |> AddrSet.filter (fun addr ->
+           sub_first_addr <= addr
+           && addr <= sub_last_addr)
+       (* ^ We must ensure the landing address belongs to the current
+          subroutine for our purpose *)
+    in
+
+    let terminator = BStd.Block.terminator block in
+    (* `terminator` is the only jump-ish instruction in `block` *)
+
+    (match BStd.Insn.is BStd.Insn.call terminator with
+     | true ->
+       (* `terminator` is a call: we mustn't include the callee as a successor
+          of this block. *)
+
+       (* Only one output: the one that is closest to `last_addr`, forwards. *)
+
+       (match AddrSet.find_first_opt
+                (fun x -> Int64.(last_addr < x)) blk_outputs with
+       | Some ret_addr ->
+         let delta = Int64.sub ret_addr last_addr |> Int64.to_int in
+         if delta >= 32 then
+           assert false (* FIXME maybe no return *)
+         else (
+           (AddrSet.singleton ret_addr)
+         )
+       | None -> AddrSet.empty (* assume no return *)
+       )
+
+     | false ->
+       (* `terminator` is not a call, all this block's outputs are correct
+          successors *)
+       blk_outputs
+    )
+  in
+
   let build_of_block cur_map block =
     (try
        (* First, check that this block belongs to a subroutine *)
@@ -197,19 +250,8 @@ let build_next_instr sub_ranges (disasm: BStd.disasm): AddrSet.t AddrMap.t =
        (* Then the set of possible destinations for the block terminator *)
        (match last_addr with
         | Some last_addr ->
-          let following_set = BStd.Graphs.Cfg.Node.outputs block cfg
-                              |> BStd.Seq.fold
-                                ~init:AddrSet.empty
-                                ~f:(fun set edge -> AddrSet.union
-                                       (block_addresses
-                                          (BStd.Graphs.Cfg.Edge.dst edge))
-                                       set)
-                              |> AddrSet.filter (fun addr ->
-                                  sub_first_addr <= addr
-                                  && addr <= sub_last_addr)
-                                (* ^ We must ensure the landing address belongs
-                                   to the current subroutine for our purpose *)
-          in
+          let following_set = block_following_set
+              block sub_first_addr sub_last_addr last_addr in
           AddrMap.add last_addr following_set cur_map
         | None -> cur_map
        )
