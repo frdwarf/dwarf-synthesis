@@ -264,6 +264,11 @@ let build_next_instr sub_ranges (disasm: BStd.disasm): AddrSet.t AddrMap.t =
     ~init:AddrMap.empty
     ~f:build_of_block
 
+type rbp_pop_state =
+  | SomePop of BStd.tid
+  | SomeRbpUse
+  | NoPop
+
 let find_rbp_pop_set cfg entry =
   (** Returns a BStd.Tid.Set.t of the terms actually "popping" %rbp, that is,
       the terms that should trigger a change to RbpUndef of the %rbp register.
@@ -273,6 +278,8 @@ let find_rbp_pop_set cfg entry =
       ii) that are the last of this kind in the subroutine's CFG (ie. such that
         there is not another instruction matching (i) that is reachable through
         the CFG from the current instruction).
+      iii) that are the last references to %rbp in a `Def` in the subroutine's
+        CFG (cf (ii)).
   *)
 
   let def_is_rbp_pop def =
@@ -302,20 +309,30 @@ let find_rbp_pop_set cfg entry =
     )
   in
 
+  let def_uses_rbp def =
+    let def_vars = BStd.Var.Set.add
+        (BStd.Def.free_vars def)
+        (BStd.Def.lhs def) in
+    BStd.Var.Set.exists def_vars (fun var -> match Regs.X86_64.of_var var with
+        | Some x when x = Regs.X86_64.rbp -> true
+        | _ -> false)
+  in
 
   let block_find_rbp_pop block =
     let fold_elt = function
-      | `Def(def) when (def_is_rbp_pop def) -> Some (BStd.Term.tid def)
-      | _ -> None
+      | `Def(def) when (def_is_rbp_pop def) -> SomePop (BStd.Term.tid def)
+      | `Def(def) when (def_uses_rbp def) -> SomeRbpUse
+      | _ -> NoPop
     in
 
     let elts_seq = BStd.Blk.elts block in
     let last_pop = BStd.Seq.fold elts_seq
-        ~init:None
+        ~init:NoPop
         ~f:(fun accu elt ->
             (match fold_elt elt with
-             | None -> accu
-             | Some tid -> Some tid))
+             | NoPop -> accu
+             | SomeRbpUse -> SomeRbpUse
+             | SomePop tid -> SomePop tid))
     in
     last_pop
   in
@@ -330,7 +347,7 @@ let find_rbp_pop_set cfg entry =
       BStd.Tid.Set.empty, true, visited
     | false ->
       let visited = BStd.Blk.Set.add visited block in
-      let pop_set, has_pop, visited =
+      let pop_set, eligible, visited =
         BStd.Seq.fold (CFG.Node.succs node cfg)
           ~f:(fun (pre_pop_set, pre_has_pop, visited) child ->
               let cur_pop_set, cur_has_pop, visited =
@@ -341,14 +358,15 @@ let find_rbp_pop_set cfg entry =
             )
           ~init:(BStd.Tid.Set.empty, false, visited)
       in
-      let pop_set, has_pop = (match has_pop with
+      let pop_set, eligible = (match eligible with
           | false -> (* No rbp pop below, we seek rbp pops in this block *)
             (match block_find_rbp_pop block with
-                | None -> pop_set, false
-                | Some tid -> BStd.Tid.Set.add pop_set tid, true
+                | NoPop -> pop_set, false
+                | SomeRbpUse -> pop_set, true
+                | SomePop tid -> BStd.Tid.Set.add pop_set tid, true
             )
-          | true -> pop_set, has_pop) in
-      pop_set, has_pop, visited
+          | true -> pop_set, eligible) in
+      pop_set, eligible, visited
     )
   in
 
@@ -739,8 +757,9 @@ let process_sub sub next_instr_graph : subroutine_cfa_data =
       (* Already visited: check that entry values are matching *)
       if entry_offset <> former_entry_offset then (
         if allow_rbp then
-          Format.eprintf "Found inconsistency (0x%Lx): %a -- %a@."
+          Format.eprintf "Found inconsistency (0x%Lx <%a>): %a -- %a@."
             (int64_addr_of cur_blk)
+            BStd.Tid.pp tid
             pp_reg_pos entry_offset pp_reg_pos former_entry_offset ;
         raise (Inconsistent tid)
       )
