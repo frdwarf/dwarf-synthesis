@@ -524,7 +524,13 @@ let process_jmp jmp (cur_reg: reg_pos)
   in
 
   match (BStd.Jmp.kind jmp) with
-  | BStd.Call call -> gen_change (-8)
+  | BStd.Call call -> (
+      (* If this call never returns (tail call), do not generate an offset of
+         -8. *)
+      match BStd.Call.return call with
+      | Some _ -> gen_change (-8)
+      | None -> None
+    )
   | BStd.Ret ret -> gen_change (8)
   | _ -> None
 
