@@ -654,10 +654,15 @@ let process_blk
 
 exception Inconsistent of BStd.tid
 
-let get_entry_blk graph =
+let get_entry_blk graph first_addr =
+  let filter_out_of_range = function
+    | None -> None
+    | Some x when x < first_addr -> None
+    | Some x -> Some x
+  in
   let entry = BStd.Seq.min_elt (CFG.nodes graph) ~cmp:(fun x y ->
-      let ax = opt_addr_of @@ CFG.Node.label x
-      and ay = opt_addr_of @@ CFG.Node.label y in
+      let ax = filter_out_of_range @@ opt_addr_of @@ CFG.Node.label x
+      and ay = filter_out_of_range @@ opt_addr_of @@ CFG.Node.label y in
       match ax, ay with
       | None, None -> compare x y
       | Some _, None -> -1
@@ -732,12 +737,13 @@ let process_sub sub next_instr_graph : subroutine_cfa_data =
 
   let cfg = BStd.Sub.to_cfg sub in
 
-  let first_addr = int64_addr_of sub in
+  let first_bap_addr = addr_of sub in
+  let first_addr = to_int64_addr first_bap_addr in
   let last_addr = find_last_addr sub in
 
   let initial_cfa_rsp_offset = Int64.of_int 8 in
 
-  let entry_blk = get_entry_blk cfg in
+  let entry_blk = get_entry_blk cfg (first_bap_addr) in
   let rbp_pop_set = find_rbp_pop_set cfg entry_blk in
 
   let rec dfs_process
@@ -758,8 +764,14 @@ let process_sub sub next_instr_graph : subroutine_cfa_data =
           allow_rbp entry_offset cur_blk in
       let n_sub_changes =
         TIdMap.add tid (cur_blk_changes, entry_offset) sub_changes in
+
       BStd.Seq.fold (CFG.Node.succs node cfg)
-        ~f:(fun accu child -> dfs_process allow_rbp accu child end_reg)
+        ~f:(fun accu child ->
+            (match entrypoint_address (CFG.Node.label child) with
+             | Some x when x < first_bap_addr -> accu
+             | _ -> dfs_process allow_rbp accu child end_reg)
+            )
+
         ~init:n_sub_changes
     | Some (_, former_entry_offset) ->
       (* Already visited: check that entry values are matching *)
