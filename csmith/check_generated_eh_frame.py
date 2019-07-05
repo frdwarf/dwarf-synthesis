@@ -59,7 +59,7 @@ def detect_clang_flat_to_pyramid(rows):
       [k'; k[
     """
 
-    def is_flatness_row(row, prev_cfa, prev_loc):
+    def is_flatness_row(row, prev_cfa, prev_loc, first_row=False):
         for reg in row:
             if reg not in ["LOC", "CFA", "ra"] and row[reg] != "u":
                 return prev_cfa, prev_loc, True
@@ -71,7 +71,7 @@ def detect_clang_flat_to_pyramid(rows):
             return prev_cfa, prev_loc, True
         prev_cfa += 8
         loc = row["LOC"]
-        if loc > prev_loc + 2:
+        if not first_row and loc > prev_loc + 2:
             return prev_cfa, prev_loc, True
         prev_loc = loc
 
@@ -87,9 +87,13 @@ def detect_clang_flat_to_pyramid(rows):
         first_cfa = int(rows[start_row]["CFA"][4:])
         prev_cfa = first_cfa
         prev_loc = rows[start_row]["LOC"]
+        first_row = True
 
         for row in rows[start_row + 1 :]:
-            prev_cfa, prev_loc, flatness = is_flatness_row(row, prev_cfa, prev_loc)
+            prev_cfa, prev_loc, flatness = is_flatness_row(
+                row, prev_cfa, prev_loc, first_row
+            )
+            first_row = False
             if flatness:
                 break
             flatness_row_id += 1
