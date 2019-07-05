@@ -746,6 +746,18 @@ let process_sub sub next_instr_graph : subroutine_cfa_data =
   let entry_blk = get_entry_blk cfg (first_bap_addr) in
   let rbp_pop_set = find_rbp_pop_set cfg entry_blk in
 
+  let valid_merge previous_regs cur_regs =
+    let valid_rbp_merge old cur =
+      (old = cur) || (match old, cur with
+          | RbpUndef, RbpCfaOffset _ -> true
+          | _ -> false)
+    in
+
+    let prev_cfa, prev_rbp = previous_regs in
+    let cur_cfa, cur_rbp = cur_regs in
+    (prev_cfa = cur_cfa) && valid_rbp_merge prev_rbp cur_rbp
+  in
+
   let rec dfs_process
       allow_rbp
       (sub_changes: (reg_changes_fde * reg_pos) TIdMap.t)
@@ -775,7 +787,7 @@ let process_sub sub next_instr_graph : subroutine_cfa_data =
         ~init:n_sub_changes
     | Some (_, former_entry_offset) ->
       (* Already visited: check that entry values are matching *)
-      if entry_offset <> former_entry_offset then (
+      if not @@ valid_merge former_entry_offset entry_offset then (
         if allow_rbp then
           Format.eprintf "Found inconsistency (0x%Lx <%a>): %a -- %a@."
             (int64_addr_of cur_blk)
