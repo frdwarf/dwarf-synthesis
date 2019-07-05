@@ -59,6 +59,24 @@ def detect_clang_flat_to_pyramid(rows):
       [k'; k[
     """
 
+    def is_flatness_row(row, prev_cfa, prev_loc):
+        for reg in row:
+            if reg not in ["LOC", "CFA", "ra"] and row[reg] != "u":
+                return prev_cfa, prev_loc, True
+        cfa = row["CFA"]
+        if cfa[:4] != "rsp+":
+            return prev_cfa, prev_loc, True
+        cfa_offset = int(cfa[4:])
+        if cfa_offset != prev_cfa + 8:
+            return prev_cfa, prev_loc, True
+        prev_cfa += 8
+        loc = row["LOC"]
+        if loc > prev_loc + 2:
+            return prev_cfa, prev_loc, True
+        prev_loc = loc
+
+        return prev_cfa, prev_loc, False
+
     def try_starting_at(start_row):
         if len(rows) < start_row + 1:  # Ensure we have at least the start row
             return rows, False
@@ -69,22 +87,13 @@ def detect_clang_flat_to_pyramid(rows):
         first_cfa = int(rows[start_row]["CFA"][4:])
         prev_cfa = first_cfa
         prev_loc = rows[start_row]["LOC"]
+
         for row in rows[start_row + 1 :]:
-            for reg in row:
-                if reg not in ["LOC", "CFA", "ra"] and row[reg] != "u":
-                    break
-            cfa = row["CFA"]
-            if cfa[:4] != "rsp+":
+            prev_cfa, prev_loc, flatness = is_flatness_row(row, prev_cfa, prev_loc)
+            if flatness:
                 break
-            cfa_offset = int(cfa[4:])
-            if cfa_offset != prev_cfa + 8:
-                break
-            prev_cfa += 8
-            loc = row["LOC"]
-            if loc > prev_loc + 2:
-                break
-            prev_loc = loc
             flatness_row_id += 1
+
         flatness_row_id += 1
         if flatness_row_id - start_row <= 1 or flatness_row_id >= len(rows):
             return rows, False  # nothing to change
