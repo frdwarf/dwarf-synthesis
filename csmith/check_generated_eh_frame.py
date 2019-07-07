@@ -386,7 +386,9 @@ def main():
         # If we had some errors to report, let's report positive data too
         reports.append("{} matched".format(len(matched)))
         print("{}: {}".format(test_name, "; ".join(reports)))
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

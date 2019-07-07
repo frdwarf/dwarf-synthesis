@@ -23,3 +23,4 @@ fi
     readelf -wF "$orig_path" ; \
     echo "===" ; \
     readelf -wF "$eh_path") | python $py_checker $*
+exit $?
