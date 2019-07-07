@@ -732,6 +732,38 @@ let cleanup_fde (fde_changes: reg_changes_fde) : reg_changes_fde =
   match AddrMap.fold fold_one fde_changes (AddrMap.empty, None, false) with
   | out, _, _ -> out
 
+
+type merge_type =
+    Valid_merge
+  | Invalid_merge
+  | Valid_with_rbp_erasing of reg_pos
+
+let valid_merge_boilerplate regs_1 regs_2 valid_rbp_merge =
+  let r1_cfa, r1_rbp = regs_1 in
+  let r2_cfa, r2_rbp = regs_2 in
+  (match r1_cfa = r2_cfa with
+   | true -> valid_rbp_merge r1_rbp r2_rbp r1_cfa
+   | false -> Invalid_merge)
+
+
+let symmetric_valid_merge regs_1 regs_2 =
+  let valid_rbp_merge r1 r2 cfa = (match r1, r2 with
+      | x, y when x = y -> Valid_merge
+      | RbpUndef, RbpCfaOffset _ -> Valid_with_rbp_erasing (cfa, r1)
+      | RbpCfaOffset _, RbpUndef -> Valid_with_rbp_erasing (cfa, r2)
+      | _ -> Invalid_merge)
+  in
+  valid_merge_boilerplate regs_1 regs_2 valid_rbp_merge
+
+let valid_merge previous_regs cur_regs =
+  let valid_rbp_merge old cur cfa = (match old, cur with
+      | x, y when x = y -> Valid_merge
+      | RbpUndef, RbpCfaOffset _ -> Valid_merge
+      | RbpCfaOffset _, RbpUndef -> Valid_with_rbp_erasing (cfa, cur)
+      | _ -> Invalid_merge)
+  in
+  valid_merge_boilerplate previous_regs cur_regs valid_rbp_merge
+
 let process_sub sub next_instr_graph : subroutine_cfa_data =
   (** Extracts the `cfa_changes_fde` of a subroutine *)
 
@@ -746,17 +778,6 @@ let process_sub sub next_instr_graph : subroutine_cfa_data =
   let entry_blk = get_entry_blk cfg (first_bap_addr) in
   let rbp_pop_set = find_rbp_pop_set cfg entry_blk in
 
-  let valid_merge previous_regs cur_regs =
-    let valid_rbp_merge old cur =
-      (old = cur) || (match old, cur with
-          | RbpUndef, RbpCfaOffset _ -> true
-          | _ -> false)
-    in
-
-    let prev_cfa, prev_rbp = previous_regs in
-    let cur_cfa, cur_rbp = cur_regs in
-    (prev_cfa = cur_cfa) && valid_rbp_merge prev_rbp cur_rbp
-  in
 
   let rec dfs_process
       allow_rbp
@@ -768,14 +789,21 @@ let process_sub sub next_instr_graph : subroutine_cfa_data =
     let cur_blk = CFG.Node.label node in
     let tid = BStd.Term.tid @@ cur_blk in
 
-    match (TIdMap.find_opt tid sub_changes) with
-    | None ->
-      (* Not yet visited: compute the changes *)
+    let compute_block_and_update entry_offset sub_changes =
       let cur_blk_changes, end_reg =
         process_blk next_instr_graph rbp_pop_set
           allow_rbp entry_offset cur_blk in
       let n_sub_changes =
         TIdMap.add tid (cur_blk_changes, entry_offset) sub_changes in
+      n_sub_changes, end_reg
+    in
+
+
+    match (TIdMap.find_opt tid sub_changes) with
+    | None ->
+      (* Not yet visited: compute the changes *)
+      let n_sub_changes, end_reg =
+        compute_block_and_update entry_offset sub_changes in
 
       BStd.Seq.fold (CFG.Node.succs node cfg)
         ~f:(fun accu child ->
@@ -787,16 +815,38 @@ let process_sub sub next_instr_graph : subroutine_cfa_data =
         ~init:n_sub_changes
     | Some (_, former_entry_offset) ->
       (* Already visited: check that entry values are matching *)
-      if not @@ valid_merge former_entry_offset entry_offset then (
-        if allow_rbp then
-          Format.eprintf "Found inconsistency (0x%Lx <%a>): %a -- %a@."
-            (int64_addr_of cur_blk)
-            BStd.Tid.pp tid
-            pp_reg_pos entry_offset pp_reg_pos former_entry_offset ;
-        raise (Inconsistent tid)
+
+      let do_fail () =
+         if allow_rbp then
+           Format.eprintf "Found inconsistency (0x%Lx <%a>): %a -- %a@."
+             (int64_addr_of cur_blk)
+             BStd.Tid.pp tid
+             pp_reg_pos entry_offset pp_reg_pos former_entry_offset ;
+         raise (Inconsistent tid)
+      in
+
+      (match valid_merge former_entry_offset entry_offset with
+       | Valid_merge -> sub_changes
+
+       | Invalid_merge -> do_fail ()
+       | Valid_with_rbp_erasing _ ->
+         (* Valid only if we manage to set back %rbp to undef in this block and
+            propagate the changes.
+            This tends to happen mostly in leaf blocks of a function (just
+            before a return), so we only handle the case for those blocks, in
+            which case there is no propagation needed.
+            The easy way to do this is simply to re-synthesize the block.
+         *)
+         let out_degree = CFG.Node.degree ~dir:`Out node cfg in
+         (match out_degree with
+          | 0 ->
+            let n_sub_changes, _ =
+              compute_block_and_update entry_offset sub_changes in
+            n_sub_changes
+          | _ ->
+            do_fail ()
+         )
       )
-      else
-        sub_changes
   in
 
   let with_rbp_if_needed initial_offset =
@@ -832,16 +882,18 @@ let process_sub sub next_instr_graph : subroutine_cfa_data =
 
   let merged_changes = TIdMap.fold
       (fun _ (cfa_changes, _) accu -> AddrMap.union (fun addr v1 v2 ->
-           if v1 = v2 then
-             Some v1
-           else (
+           match (symmetric_valid_merge v1 v2) with
+           | Valid_merge -> Some v1
+           | Invalid_merge ->
              Format.eprintf "Inconsistency: 0x%Lx: cannot merge %a - %a@."
                addr pp_reg_pos v1 pp_reg_pos v2 ;
-             Some (CfaLostTrack, RbpUndef))
+             Some (CfaLostTrack, RbpUndef)
+           | Valid_with_rbp_erasing valid_merge ->
+             Some valid_merge
          )
            cfa_changes accu)
-    changes_map
-    AddrMap.empty in
+      changes_map
+      AddrMap.empty in
 
   let reg_changes = cleanup_fde merged_changes in
 
