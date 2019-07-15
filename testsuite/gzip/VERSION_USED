@@ -1,0 +1,3 @@
+The `gzip` binary in this directory is a gzip version 1.10, compiled with the
+compilation instructions provided by the maintainers, except for a `-static`
+flag.
