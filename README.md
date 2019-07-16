@@ -10,7 +10,8 @@ examine its assembly code and, based solely on that, generate the corresponding
 
 This tool relies on
 
-* [BAP](https://github.com/BinaryAnalysisPlatform/bap) version 1.6 as of today,
+* `opam` set up with an OCaml 4.05 switch (see below),
+* [BAP](https://github.com/BinaryAnalysisPlatform/bap) version 1.5 as of today,
   which is available through OPAM;
 * `objcopy`, often packaged as `binutils`
 * `libelf`
@@ -20,10 +21,25 @@ This tool relies on
 ### Installing dependencies
 
 You should be able to easily install `objcopy` (`binutils`), `libelf`,
-`libdwarf` and `opam` via your package manager. Once
-[`opam` is set up](https://opam.ocaml.org/doc/Install.html), you should be able
-to simply `opam install bap`. We recommand that you use a fresh `opam switch`
-in case you already have installed packages with `opam`.
+`libdwarf` and `opam` via your package manager.
+
+Once [`opam` is set up](https://opam.ocaml.org/doc/Install.html), you will have
+to use an `OCaml 4.05` opam switch. If you are not familiar with opam, we
+recommand using a fresh switch:
+
+```bash
+# If you never used opam before on this session:
+opam init
+eval $(opam config env)
+
+opam switch create dwarf-synthesis ocaml-base-compiler.4.05.0  # With opam 2
+# OR
+opam switch dwarf-synthesis --alias-of 4.05.0                  # With opam 1.x
+
+# Always:
+eval $(opam config env)
+opam install bap
+```
 
 ## Compiling
 

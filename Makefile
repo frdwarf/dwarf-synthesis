@@ -49,5 +49,6 @@ $(TARBALL):
 		--exclude=*.cmi \
 		--exclude=*.cmx \
 		--transform='s#^#dwarfsynth/#g' \
-		DwarfSynth dwarfsynth.ml DwarfSynth.mlpack libdwarfw LICENSE Makefile \
-		README.md synthesize_dwarf.sh _tags
+		csmith DwarfSynth dwarfsynth.ml DwarfSynth.mlpack HEURISTICS.md \
+		libdwarfw LICENSE Makefile README.md synthesize_dwarf.sh _tags \
+		testsuite
