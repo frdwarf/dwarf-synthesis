@@ -48,6 +48,11 @@ $(TARBALL):
 		--exclude=*.o \
 		--exclude=*.cmi \
 		--exclude=*.cmx \
+		--exclude=*.tar.gz \
+		--exclude=testsuite/sqlite3/sqlite \
+		--exclude=testsuite/gnupg/gnupg \
+		--exclude=testsuite/gnupg/gnupg \
+		--exclude=csmith/kept_tests \
 		--transform='s#^#dwarfsynth/#g' \
 		csmith DwarfSynth dwarfsynth.ml DwarfSynth.mlpack HEURISTICS.md \
 		libdwarfw LICENSE Makefile README.md synthesize_dwarf.sh _tags \
